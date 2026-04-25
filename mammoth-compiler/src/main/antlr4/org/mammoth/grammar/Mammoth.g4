@@ -75,6 +75,7 @@ primitiveType
     | typeName=INT
     | typeName=FLOAT
     | typeName=VOID
+    | typeName=NOTHING
     ;
 
 block
@@ -85,11 +86,29 @@ statement
     : expressionStatement
     | returnStatement
     | localVarDeclaration
+    | tryStatement
+    | throwStatement
     | block
     ;
 
 localVarDeclaration
     : type variableDeclarator SEMICOLON
+    ;
+
+tryStatement
+    : TRY tryBlock=block catchClause* finallyBlock=finallyClause?
+    ;
+
+catchClause
+    : CATCH LPAREN qualifiedName VARIABLE RPAREN block
+    ;
+
+finallyClause
+    : FINALLY block
+    ;
+
+throwStatement
+    : THROW expression SEMICOLON
     ;
 
 expressionStatement
@@ -112,9 +131,14 @@ expression
 primary
     : literal
     | closureExpression
+    | newExpression
     | callExpression
     | VARIABLE
     | LPAREN expression RPAREN
+    ;
+
+newExpression
+    : NEW qualifiedName LPAREN arguments? RPAREN
     ;
 
 callExpression
@@ -188,6 +212,11 @@ STATIC      : 'static';
 FUNCTION    : 'function';
 RETURN      : 'return';
 NULL        : 'null';
+TRY         : 'try';
+CATCH       : 'catch';
+FINALLY     : 'finally';
+THROW       : 'throw';
+NEW         : 'new';
 
 // Builtin functions
 PRINT       : 'print';
@@ -207,6 +236,7 @@ BYTE        : 'byte';
 INT         : 'int';
 FLOAT       : 'float';
 VOID        : 'void';
+NOTHING     : 'nothing';
 
 // Boolean literals
 BOOLEAN_LITERAL : 'true' | 'false';

@@ -129,6 +129,45 @@ public class SemanticAnalyzer {
             }
         } else if (stmt instanceof BlockNode bn) {
             analyzeBlock(bn);
+        } else if (stmt instanceof TryNode tn) {
+            analyzeTryNode(tn);
+        } else if (stmt instanceof ThrowNode tn) {
+            resolveExpression(tn.getExpression());
+        }
+    }
+
+    private void analyzeTryNode(TryNode tryNode) {
+        // Analyze try block
+        if (tryNode.getTryBlock() != null) {
+            analyzeBlock(tryNode.getTryBlock());
+        }
+
+        // Analyze catch clauses
+        for (CatchClause clause : tryNode.getCatchClauses()) {
+            // Exception type is a class name, not a mammoth primitive type
+            String exceptionTypeName = clause.getExceptionType().getBaseTypeName();
+            String jvmType = mapToJvmType(exceptionTypeName);
+            clause.setResolvedType(MammothType.STRING); // treat as Object reference
+
+            // Register exception variable in catch scope
+            symbolTable.pushScope();
+            Symbol sym = new Symbol(clause.getVariableName(), Symbol.SymbolKind.VARIABLE);
+            sym.setTypeNode(clause.getExceptionType());
+            sym.setResolvedType(MammothType.STRING); // exception is an Object
+            sym.setLocalIndex(symbolTable.allocateLocalVar(false)); // reference type
+            sym.setInitialized(true);
+            symbolTable.define(sym);
+            clause.setLocalIndex(sym.getLocalIndex());
+
+            if (clause.getBody() != null) {
+                analyzeBlock(clause.getBody());
+            }
+            symbolTable.popScope();
+        }
+
+        // Analyze finally block
+        if (tryNode.getFinallyBlock() != null) {
+            analyzeBlock(tryNode.getFinallyBlock());
         }
     }
 
@@ -176,6 +215,10 @@ public class SemanticAnalyzer {
             resolveExpression(cn.getExpression());
         } else if (expr instanceof ClosureNode cn) {
             analyzeClosure(cn);
+        } else if (expr instanceof NewNode nn) {
+            for (ExpressionNode arg : nn.getArguments()) {
+                resolveExpression(arg);
+            }
         }
     }
 
@@ -308,5 +351,16 @@ public class SemanticAnalyzer {
         MammothType resolved = MammothType.fromTypeName(typeNode.getBaseTypeName());
         typeNode.setResolvedType(resolved);
         return resolved;
+    }
+
+    private String mapToJvmType(String typeName) {
+        return switch (typeName) {
+            case "Exception" -> "java/lang/Exception";
+            case "RuntimeException" -> "java/lang/RuntimeException";
+            case "ArithmeticException" -> "java/lang/ArithmeticException";
+            case "Throwable" -> "java/lang/Throwable";
+            case "Error" -> "java/lang/Error";
+            default -> typeName.replace('.', '/');
+        };
     }
 }

@@ -145,6 +145,33 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         return localVar;
     }
 
+    @Override
+    public TryNode visitTryStatement(MammothParser.TryStatementContext ctx) {
+        TryNode tryNode = new TryNode(ctx.start.getLine(), ctx.start.getCharPositionInLine());
+        tryNode.setTryBlock(visitBlock(ctx.tryBlock));
+
+        for (MammothParser.CatchClauseContext cc : ctx.catchClause()) {
+            String exceptionTypeName = cc.qualifiedName().getText();
+            CatchClause clause = new CatchClause(
+                new TypeNode(exceptionTypeName, false),
+                cc.VARIABLE().getText()
+            );
+            clause.setBody(visitBlock(cc.block()));
+            tryNode.addCatchClause(clause);
+        }
+
+        if (ctx.finallyBlock != null) {
+            tryNode.setFinallyBlock(visitBlock(ctx.finallyBlock.block()));
+        }
+
+        return tryNode;
+    }
+
+    @Override
+    public ThrowNode visitThrowStatement(MammothParser.ThrowStatementContext ctx) {
+        return new ThrowNode(ctx.start, parseExpression(ctx.expression()));
+    }
+
     // ---- Label methods for expression rule ----
 
     @Override
@@ -202,6 +229,9 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         }
         if (ctx.closureExpression() != null) {
             return visitClosureExpression(ctx.closureExpression());
+        }
+        if (ctx.newExpression() != null) {
+            return visitNewExpression(ctx.newExpression());
         }
         if (ctx.callExpression() != null) {
             return visitCallExpression(ctx.callExpression());
@@ -299,5 +329,17 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
 
         closure.setBody(visitBlock(ctx.block()));
         return closure;
+    }
+
+    @Override
+    public NewNode visitNewExpression(MammothParser.NewExpressionContext ctx) {
+        String className = ctx.qualifiedName().getText();
+        NewNode node = new NewNode(ctx.start, className);
+        if (ctx.arguments() != null) {
+            for (MammothParser.ExpressionContext expr : ctx.arguments().expression()) {
+                node.addArgument(parseExpression(expr));
+            }
+        }
+        return node;
     }
 }

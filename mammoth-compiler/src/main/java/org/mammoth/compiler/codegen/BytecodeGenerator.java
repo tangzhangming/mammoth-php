@@ -6,6 +6,7 @@ import org.mammoth.compiler.semantic.Symbol;
 import org.mammoth.compiler.semantic.SymbolTable;
 import org.mammoth.compiler.types.MammothType;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
@@ -54,7 +55,19 @@ public class BytecodeGenerator {
     }
 
     private byte[] generateClass(ProgramNode program, ClassNode cls, String packageName) {
-        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES) {
+            @Override
+            protected String getCommonSuperClass(String type1, String type2) {
+                // Simple fallback: everything extends Object for generated classes
+                if (type1.equals("java/lang/Object") || type2.equals("java/lang/Object"))
+                    return "java/lang/Object";
+                try {
+                    return super.getCommonSuperClass(type1, type2);
+                } catch (Exception e) {
+                    return "java/lang/Object";
+                }
+            }
+        };
 
         int classAccess = getClassAccess(cls.getVisibility());
         String[] interfaces = {};
@@ -162,6 +175,11 @@ public class BytecodeGenerator {
             generateBlock(mv, bn, symbolTable);
         } else if (stmt instanceof LocalVarNode lvn) {
             generateLocalVar(mv, lvn, symbolTable);
+        } else if (stmt instanceof TryNode tn) {
+            generateTryStatement(mv, tn, symbolTable);
+        } else if (stmt instanceof ThrowNode tn) {
+            generateExpression(mv, tn.getExpression(), symbolTable);
+            mv.visitInsn(Opcodes.ATHROW);
         }
     }
 
@@ -175,6 +193,91 @@ public class BytecodeGenerator {
                 mv.visitVarInsn(targetType.getStoreOpcode(), lvn.getLocalIndex());
             }
         }
+    }
+
+    // ======================== New expression ========================
+
+    private void generateNewExpr(MethodVisitor mv, NewNode nn) {
+        String internalName = nn.getClassName().replace('.', '/');
+        // Map known types
+        internalName = mapToJvmType(internalName);
+        mv.visitTypeInsn(Opcodes.NEW, internalName);
+        mv.visitInsn(Opcodes.DUP);
+
+        StringBuilder ctorDesc = new StringBuilder("(");
+        for (ExpressionNode arg : nn.getArguments()) {
+            generateExpression(mv, arg, null);
+            MammothType type = getExprType(arg);
+            ctorDesc.append(type != null ? type.getDescriptor() : "Ljava/lang/Object;");
+        }
+        ctorDesc.append(")V");
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, internalName, "<init>", ctorDesc.toString(), false);
+    }
+
+    private void generateTryStatement(MethodVisitor mv, TryNode tryNode, SymbolTable symbolTable) {
+        Label tryStart = new Label();
+        Label tryEnd = new Label();
+        List<CatchClause> catches = tryNode.getCatchClauses();
+        Label[] catchStarts = new Label[catches.size()];
+        String[] catchTypes = new String[catches.size()];
+        Label finallyStart = tryNode.hasFinally() ? new Label() : null;
+        Label afterAll = new Label();
+
+        // Map types and prepare labels
+        for (int i = 0; i < catches.size(); i++) {
+            catchStarts[i] = new Label();
+            catchTypes[i] = mapToJvmType(catches.get(i).getExceptionType().getBaseTypeName());
+            mv.visitTryCatchBlock(tryStart, tryEnd, catchStarts[i], catchTypes[i]);
+        }
+
+        // === Try body ===
+        mv.visitLabel(tryStart);
+        generateBlock(mv, tryNode.getTryBlock(), symbolTable);
+        mv.visitLabel(tryEnd);
+        if (finallyStart != null) {
+            mv.visitJumpInsn(Opcodes.GOTO, finallyStart);
+        } else {
+            mv.visitJumpInsn(Opcodes.GOTO, afterAll);
+        }
+
+        // === Catch handlers ===
+        for (int i = 0; i < catches.size(); i++) {
+            mv.visitLabel(catchStarts[i]);
+            CatchClause clause = catches.get(i);
+            // Store the caught exception into the local variable
+            if (clause.getLocalIndex() >= 0) {
+                mv.visitVarInsn(Opcodes.ASTORE, clause.getLocalIndex());
+                // Also need to DUP before storing if we need it for later
+                // Actually, the exception is on the stack; just store it
+            }
+            generateBlock(mv, clause.getBody(), symbolTable);
+            if (finallyStart != null) {
+                mv.visitJumpInsn(Opcodes.GOTO, finallyStart);
+            } else {
+                mv.visitJumpInsn(Opcodes.GOTO, afterAll);
+            }
+        }
+
+        // === Finally block ===
+        if (finallyStart != null) {
+            mv.visitLabel(finallyStart);
+            // Save any pending return value on stack before finally
+            // For now: simple finally without exception save/restore
+            generateBlock(mv, tryNode.getFinallyBlock(), symbolTable);
+        }
+
+        mv.visitLabel(afterAll);
+    }
+
+    private String mapToJvmType(String typeName) {
+        return switch (typeName) {
+            case "Exception" -> "java/lang/Exception";
+            case "RuntimeException" -> "java/lang/RuntimeException";
+            case "ArithmeticException" -> "java/lang/ArithmeticException";
+            case "Throwable" -> "java/lang/Throwable";
+            case "Error" -> "java/lang/Error";
+            default -> typeName.replace('.', '/');
+        };
     }
 
     // ======================== Expression generation ========================
@@ -194,6 +297,8 @@ public class BytecodeGenerator {
             generateCast(mv, cn, symbolTable);
         } else if (expr instanceof ClosureNode cn) {
             generateClosureExpr(mv, cn, symbolTable);
+        } else if (expr instanceof NewNode nn) {
+            generateNewExpr(mv, nn);
         }
     }
 
@@ -484,7 +589,12 @@ public class BytecodeGenerator {
     }
 
     private byte[] generateClosureInterfaceClass(ClosureNode closure, String internalName) {
-        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES) {
+            @Override protected String getCommonSuperClass(String t1, String t2) {
+                if (t1.equals("java/lang/Object") || t2.equals("java/lang/Object")) return "java/lang/Object";
+                try { return super.getCommonSuperClass(t1, t2); } catch (Exception e) { return "java/lang/Object"; }
+            }
+        };
         cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC | Opcodes.ACC_INTERFACE | Opcodes.ACC_ABSTRACT,
             internalName, null, "java/lang/Object", null);
 
@@ -510,7 +620,12 @@ public class BytecodeGenerator {
     }
 
     private byte[] generateClosureImplClass(ClosureNode closure, String internalName, String fnInterfaceName) {
-        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES) {
+            @Override protected String getCommonSuperClass(String t1, String t2) {
+                if (t1.equals("java/lang/Object") || t2.equals("java/lang/Object")) return "java/lang/Object";
+                try { return super.getCommonSuperClass(t1, t2); } catch (Exception e) { return "java/lang/Object"; }
+            }
+        };
         String[] interfaces = {fnInterfaceName};
         cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, internalName, null,
             "java/lang/Object", interfaces);
@@ -779,6 +894,9 @@ public class BytecodeGenerator {
         }
         if (expr instanceof ClosureNode) {
             return MammothType.STRING; // closure type = Object for now
+        }
+        if (expr instanceof NewNode) {
+            return MammothType.NULL; // new returns an object reference (NULL type here means Object)
         }
         return MammothType.STRING;
     }

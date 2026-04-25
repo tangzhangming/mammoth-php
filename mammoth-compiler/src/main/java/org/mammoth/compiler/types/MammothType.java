@@ -12,6 +12,7 @@ public enum MammothType {
     FLOAT32("float32", "F", float.class),
     FLOAT64("float64", "D", double.class),
     VOID("void", "V", void.class),
+    NOTHING("nothing", "V", void.class),  // bottom type - subsume all; never returns normally
     NULL("null", "Ljava/lang/Object;", null);
 
     private final String mammothName;
@@ -36,6 +37,10 @@ public enum MammothType {
         return this == FLOAT32 || this == FLOAT64;
     }
 
+    public boolean isNothing() {
+        return this == NOTHING;
+    }
+
     public boolean isNumeric() {
         return isIntegral() || isFloatingPoint();
     }
@@ -58,6 +63,7 @@ public enum MammothType {
             case "int"     -> INT64;
             case "float"   -> FLOAT64;
             case "void"    -> VOID;
+            case "nothing" -> NOTHING;
             case "null"    -> NULL;
             default -> throw new IllegalArgumentException("Unknown type: " + name);
         };
@@ -69,7 +75,7 @@ public enum MammothType {
             case INT64 -> Opcodes.LRETURN;
             case FLOAT32 -> Opcodes.FRETURN;
             case FLOAT64 -> Opcodes.DRETURN;
-            case STRING, NULL -> Opcodes.ARETURN;
+            case STRING, NULL, NOTHING -> Opcodes.ARETURN;
             case VOID -> Opcodes.RETURN;
         };
     }
@@ -80,7 +86,7 @@ public enum MammothType {
             case INT64 -> Opcodes.LLOAD;
             case FLOAT32 -> Opcodes.FLOAD;
             case FLOAT64 -> Opcodes.DLOAD;
-            case STRING, NULL -> Opcodes.ALOAD;
+            case STRING, NULL, NOTHING -> Opcodes.ALOAD;
             default -> throw new IllegalStateException("No load opcode for " + this);
         };
     }
@@ -91,7 +97,7 @@ public enum MammothType {
             case INT64 -> Opcodes.LSTORE;
             case FLOAT32 -> Opcodes.FSTORE;
             case FLOAT64 -> Opcodes.DSTORE;
-            case STRING, NULL -> Opcodes.ASTORE;
+            case STRING, NULL, NOTHING -> Opcodes.ASTORE;
             default -> throw new IllegalStateException("No store opcode for " + this);
         };
     }
