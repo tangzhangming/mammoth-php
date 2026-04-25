@@ -7,6 +7,8 @@ public class ClassNode extends MammothNode {
     private String visibility = "public";
     private final java.util.List<MethodNode> methods = new java.util.ArrayList<>();
     private final java.util.List<FieldNode> fields = new java.util.ArrayList<>();
+    private final java.util.List<AnnotationNode> annotations = new java.util.ArrayList<>();
+    private boolean isAnnotation;
 
     public ClassNode(Token token, String name) {
         super(token);
@@ -22,4 +24,8 @@ public class ClassNode extends MammothNode {
 
     public java.util.List<FieldNode> getFields() { return fields; }
     public void addField(FieldNode field) { fields.add(field); }
+    public java.util.List<AnnotationNode> getAnnotations() { return annotations; }
+    public void addAnnotation(AnnotationNode ann) { annotations.add(ann); }
+    public boolean isAnnotation() { return isAnnotation; }
+    public void setAnnotation(boolean annotation) { isAnnotation = annotation; }
 }

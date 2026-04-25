@@ -11,6 +11,7 @@ public class MethodNode extends MammothNode {
     private TypeNode returnType;
     private final List<ParameterNode> parameters = new ArrayList<>();
     private BlockNode body;
+    private final java.util.List<AnnotationNode> annotations = new java.util.ArrayList<>();
 
     public MethodNode(Token token, String name) {
         super(token);
@@ -28,4 +29,6 @@ public class MethodNode extends MammothNode {
     public void addParameter(ParameterNode param) { parameters.add(param); }
     public BlockNode getBody() { return body; }
     public void setBody(BlockNode body) { this.body = body; }
+    public java.util.List<AnnotationNode> getAnnotations() { return annotations; }
+    public void addAnnotation(AnnotationNode ann) { annotations.add(ann); }
 }

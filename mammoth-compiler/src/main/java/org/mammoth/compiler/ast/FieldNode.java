@@ -7,6 +7,7 @@ public class FieldNode extends MammothNode {
     private String visibility = "public";
     private TypeNode type;
     private ExpressionNode initializer;
+    private final java.util.List<AnnotationNode> annotations = new java.util.ArrayList<>();
 
     public FieldNode(Token token, String name) {
         super(token);
@@ -20,4 +21,6 @@ public class FieldNode extends MammothNode {
     public void setType(TypeNode type) { this.type = type; }
     public ExpressionNode getInitializer() { return initializer; }
     public void setInitializer(ExpressionNode initializer) { this.initializer = initializer; }
+    public java.util.List<AnnotationNode> getAnnotations() { return annotations; }
+    public void addAnnotation(AnnotationNode ann) { annotations.add(ann); }
 }

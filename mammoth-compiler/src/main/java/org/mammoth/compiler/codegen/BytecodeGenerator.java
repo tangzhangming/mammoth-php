@@ -5,7 +5,9 @@ import org.mammoth.compiler.semantic.SemanticAnalyzer;
 import org.mammoth.compiler.semantic.Symbol;
 import org.mammoth.compiler.semantic.SymbolTable;
 import org.mammoth.compiler.types.MammothType;
+import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -55,29 +57,31 @@ public class BytecodeGenerator {
     }
 
     private byte[] generateClass(ProgramNode program, ClassNode cls, String packageName) {
-        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES) {
-            @Override
-            protected String getCommonSuperClass(String type1, String type2) {
-                // Simple fallback: everything extends Object for generated classes
-                if (type1.equals("java/lang/Object") || type2.equals("java/lang/Object"))
-                    return "java/lang/Object";
-                try {
-                    return super.getCommonSuperClass(type1, type2);
-                } catch (Exception e) {
-                    return "java/lang/Object";
-                }
-            }
-        };
-
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
         int classAccess = getClassAccess(cls.getVisibility());
+        if (cls.isAnnotation()) {
+            classAccess = Opcodes.ACC_PUBLIC | Opcodes.ACC_INTERFACE | Opcodes.ACC_ABSTRACT | Opcodes.ACC_ANNOTATION;
+        }
         String[] interfaces = {};
-        cw.visit(Opcodes.V21, classAccess, currentClassInternalName, null, "java/lang/Object", interfaces);
+        String superClass = cls.isAnnotation() ? "java/lang/Object" : "java/lang/Object";
+        cw.visit(Opcodes.V1_5, classAccess, currentClassInternalName, null, superClass, interfaces);
 
-        for (FieldNode field : cls.getFields()) {
-            generateField(cw, field);
+        // Apply class-level annotations
+        for (AnnotationNode ann : cls.getAnnotations()) {
+            applyAnnotation(cw, ann);
         }
 
-        generateDefaultConstructor(cw);
+        for (FieldNode field : cls.getFields()) {
+            if (cls.isAnnotation()) {
+                generateAnnotationMember(cw, field);
+            } else {
+                generateField(cw, field);
+            }
+        }
+
+        if (!cls.isAnnotation()) {
+            generateDefaultConstructor(cw);
+        }
 
         for (MethodNode method : cls.getMethods()) {
             generateMethod(cw, method, cls);
@@ -91,7 +95,33 @@ public class BytecodeGenerator {
         int access = getFieldAccess(field.getVisibility());
         MammothType type = getFieldType(field);
         String descriptor = type.getDescriptor();
-        cw.visitField(access, stripDollar(field.getName()), descriptor, null, null).visitEnd();
+        var fv = cw.visitField(access, stripDollar(field.getName()), descriptor, null, null);
+        for (AnnotationNode ann : field.getAnnotations()) {
+            applyAnnotation(fv, ann);
+        }
+        fv.visitEnd();
+    }
+
+    private void generateAnnotationMember(ClassWriter cw, FieldNode field) {
+        MammothType type = getFieldType(field);
+        String descriptor = "()" + type.getDescriptor();
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_ABSTRACT,
+            stripDollar(field.getName()), descriptor, null, null);
+        // If there's a default value, annotate with @AnnotationDefault
+        if (field.getInitializer() != null) {
+            AnnotationVisitor av = mv.visitAnnotationDefault();
+            // Write default value based on type
+            if (field.getInitializer() instanceof LiteralNode ln) {
+                Object val = ln.getValue();
+                if (val instanceof String) av.visit(null, val);
+                else if (val instanceof Integer iv) av.visit(null, iv);
+                else if (val instanceof Long lv) av.visit(null, lv);
+                else if (val instanceof Double dv) av.visit(null, dv);
+                else if (val instanceof Boolean bv) av.visit(null, bv);
+            }
+            av.visitEnd();
+        }
+        mv.visitEnd();
     }
 
     private void generateDefaultConstructor(ClassWriter cw) {
@@ -121,6 +151,26 @@ public class BytecodeGenerator {
         }
 
         MethodVisitor mv = cw.visitMethod(access, method.getName(), descriptor, null, null);
+
+        // Apply method-level annotations
+        for (AnnotationNode ann : method.getAnnotations()) {
+            applyAnnotation(mv, ann);
+        }
+
+        // Apply parameter annotations
+        int paramIdx = 0;
+        for (ParameterNode param : method.getParameters()) {
+            for (AnnotationNode ann : param.getAnnotations()) {
+                String annDesc = "L" + mapToAnnType(ann.getTypeName()) + ";";
+                var av = mv.visitParameterAnnotation(paramIdx, annDesc, true);
+                for (AnnotationNode.AnnotationArg arg : ann.getArgs()) {
+                    applyArg(av, arg);
+                }
+                av.visitEnd();
+            }
+            paramIdx++;
+        }
+
         mv.visitCode();
 
         SymbolTable symbolTable = analyzer.getSymbolTable();
@@ -133,7 +183,7 @@ public class BytecodeGenerator {
             mv.visitInsn(Opcodes.RETURN);
         }
 
-        mv.visitMaxs(10, 20);
+        mv.visitMaxs(100, 100);
         mv.visitEnd();
     }
 
@@ -180,6 +230,20 @@ public class BytecodeGenerator {
         } else if (stmt instanceof ThrowNode tn) {
             generateExpression(mv, tn.getExpression(), symbolTable);
             mv.visitInsn(Opcodes.ATHROW);
+        } else if (stmt instanceof IfNode in) {
+            generateIfStatement(mv, in, symbolTable);
+        } else if (stmt instanceof WhileNode wn) {
+            generateWhileStatement(mv, wn, symbolTable);
+        } else if (stmt instanceof DoWhileNode dw) {
+            generateDoWhileStatement(mv, dw, symbolTable);
+        } else if (stmt instanceof ForNode fn) {
+            generateForStatement(mv, fn, symbolTable);
+        } else if (stmt instanceof ForEachNode fen) {
+            generateForEachStatement(mv, fen, symbolTable);
+        } else if (stmt instanceof BreakNode) {
+            generateBreakContinue(mv, true);
+        } else if (stmt instanceof ContinueNode) {
+            generateBreakContinue(mv, false);
         }
     }
 
@@ -212,6 +276,96 @@ public class BytecodeGenerator {
         }
         ctorDesc.append(")V");
         mv.visitMethodInsn(Opcodes.INVOKESPECIAL, internalName, "<init>", ctorDesc.toString(), false);
+    }
+
+    // ======================== Control flow generation ========================
+
+    private final java.util.ArrayDeque<Label[]> loopLabels = new java.util.ArrayDeque<>();
+
+    private void generateIfStatement(MethodVisitor mv, IfNode in, SymbolTable st) {
+        Label elseLabel = new Label();
+        Label endLabel = new Label();
+        generateCondition(mv, in.getCondition(), elseLabel, false);
+        generateStatement(mv, in.getThenBranch(), st);
+        if (in.getElseBranch() != null) mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+        mv.visitLabel(elseLabel);
+        if (in.getElseBranch() != null) {
+            generateStatement(mv, in.getElseBranch(), st);
+            mv.visitLabel(endLabel);
+        }
+    }
+
+    private void generateWhileStatement(MethodVisitor mv, WhileNode wn, SymbolTable st) {
+        Label startLabel = new Label();
+        Label endLabel = new Label();
+        loopLabels.push(new Label[]{startLabel, endLabel});
+        mv.visitLabel(startLabel);
+        generateCondition(mv, wn.getCondition(), endLabel, false);
+        generateStatement(mv, wn.getBody(), st);
+        mv.visitJumpInsn(Opcodes.GOTO, startLabel);
+        mv.visitLabel(endLabel);
+        loopLabels.pop();
+    }
+
+    private void generateDoWhileStatement(MethodVisitor mv, DoWhileNode dw, SymbolTable st) {
+        Label startLabel = new Label();
+        Label endLabel = new Label();
+        loopLabels.push(new Label[]{startLabel, endLabel});
+        mv.visitLabel(startLabel);
+        generateStatement(mv, dw.getBody(), st);
+        generateCondition(mv, dw.getCondition(), startLabel, true);
+        mv.visitLabel(endLabel);
+        loopLabels.pop();
+    }
+
+    private void generateForStatement(MethodVisitor mv, ForNode fn, SymbolTable st) {
+        Label startLabel = new Label();
+        Label endLabel = new Label();
+        Label updateLabel = new Label();
+        loopLabels.push(new Label[]{startLabel, endLabel});
+        if (fn.getInit() != null) generateStatement(mv, fn.getInit(), st);
+        mv.visitLabel(startLabel);
+        if (fn.getCondition() != null) {
+            generateCondition(mv, fn.getCondition(), endLabel, false);
+        }
+        generateStatement(mv, fn.getBody(), st);
+        mv.visitLabel(updateLabel);
+        if (fn.getUpdate() != null) {
+            generateExpression(mv, fn.getUpdate(), st);
+            // Pop result of update expression
+            MammothType ut = getExprType(fn.getUpdate());
+            if (ut != null && ut != MammothType.VOID) {
+                if (ut == MammothType.INT64 || ut == MammothType.FLOAT64) mv.visitInsn(Opcodes.POP2);
+                else mv.visitInsn(Opcodes.POP);
+            }
+        }
+        mv.visitJumpInsn(Opcodes.GOTO, startLabel);
+        mv.visitLabel(endLabel);
+        loopLabels.pop();
+    }
+
+    private void generateForEachStatement(MethodVisitor mv, ForEachNode fen, SymbolTable st) {
+        // For now, skip foreach body generation
+    }
+
+    private void generateBreakContinue(MethodVisitor mv, boolean isBreak) {
+        if (!loopLabels.isEmpty()) {
+            Label target = isBreak ? loopLabels.peek()[1] : loopLabels.peek()[0];
+            mv.visitJumpInsn(Opcodes.GOTO, target);
+        }
+    }
+
+    /** Generate a conditional jump: if condition evaluates to 0/false, jump to label. If notIf=true, jump if true/non-zero. */
+    private void generateCondition(MethodVisitor mv, ExpressionNode condition, Label label, boolean notIf) {
+        generateExpression(mv, condition, null);
+        MammothType type = getExprType(condition);
+        // For long values, compare against 0L
+        if (type == MammothType.INT64) {
+            mv.visitInsn(Opcodes.LCONST_0);
+            mv.visitInsn(Opcodes.LCMP);
+        }
+        int opcode = notIf ? Opcodes.IFNE : Opcodes.IFEQ;
+        mv.visitJumpInsn(opcode, label);
     }
 
     private void generateTryStatement(MethodVisitor mv, TryNode tryNode, SymbolTable symbolTable) {
@@ -278,6 +432,74 @@ public class BytecodeGenerator {
             case "Error" -> "java/lang/Error";
             default -> typeName.replace('.', '/');
         };
+    }
+
+    // ======================== Annotation generation ========================
+
+    private void applyAnnotation(ClassWriter cw, AnnotationNode ann) {
+        String desc = "L" + mapToAnnType(ann.getTypeName()) + ";";
+        var av = cw.visitAnnotation(desc, true);
+        writeAnnotationArgs(av, ann);
+        av.visitEnd();
+    }
+
+    private void applyAnnotation(FieldVisitor fv, AnnotationNode ann) {
+        String desc = "L" + mapToAnnType(ann.getTypeName()) + ";";
+        var av = fv.visitAnnotation(desc, true);
+        writeAnnotationArgs(av, ann);
+        av.visitEnd();
+    }
+
+    private void applyAnnotation(MethodVisitor mv, AnnotationNode ann) {
+        String desc = "L" + mapToAnnType(ann.getTypeName()) + ";";
+        var av = mv.visitAnnotation(desc, true);
+        writeAnnotationArgs(av, ann);
+        av.visitEnd();
+    }
+
+    private void writeAnnotationArgs(AnnotationVisitor av, AnnotationNode ann) {
+        for (AnnotationNode.AnnotationArg arg : ann.getArgs()) {
+            applyArg(av, arg, ann.getTypeName());
+        }
+    }
+
+    private void applyArg(AnnotationVisitor av, AnnotationNode.AnnotationArg arg, String annTypeName) {
+        String name = arg.getName() != null ? arg.getName() : "value";
+        ExpressionNode valNode = arg.getValue();
+        if (valNode instanceof LiteralNode ln) {
+            Object val = ln.getValue();
+            if (val instanceof String) av.visit(name, val);
+            else if (val instanceof Integer iv) av.visit(name, iv);
+            else if (val instanceof Long lv) av.visit(name, lv);
+            else if (val instanceof Double dv) av.visit(name, dv);
+            else if (val instanceof Boolean bv) av.visit(name, bv);
+        } else if (valNode instanceof VariableNode vn) {
+            String enumValue = vn.getName();
+            String enumType = deriveEnumType(annTypeName);
+            av.visitEnum(name, enumType, enumValue);
+        }
+    }
+
+    private String deriveEnumType(String annTypeName) {
+        return switch (annTypeName) {
+            case "Retention" -> "Ljava/lang/annotation/RetentionPolicy;";
+            case "Target" -> "Ljava/lang/annotation/ElementType;";
+            default -> "Ljava/lang/Enum;";
+        };
+    }
+
+    private String mapToAnnType(String typeName) {
+        return switch (typeName) {
+            case "Retention" -> "java/lang/annotation/Retention";
+            case "Target" -> "java/lang/annotation/Target";
+            case "Deprecated" -> "java/lang/Deprecated";
+            case "NotNull" -> "javax/validation/constraints/NotNull";
+            default -> typeName.replace('.', '/');
+        };
+    }
+
+    private void applyArg(AnnotationVisitor av, AnnotationNode.AnnotationArg arg) {
+        applyArg(av, arg, "");
     }
 
     // ======================== Expression generation ========================
@@ -487,11 +709,79 @@ public class BytecodeGenerator {
     // ======================== Binary ops ========================
 
     private void generateBinaryOp(MethodVisitor mv, BinaryOpNode bon, SymbolTable symbolTable) {
-        generateExpression(mv, bon.getLeft(), symbolTable);
-        generateExpression(mv, bon.getRight(), symbolTable);
-
-        MammothType leftType = getExprType(bon.getLeft());
         String op = bon.getOp();
+        MammothType leftType = getExprType(bon.getLeft());
+        MammothType rightType = getExprType(bon.getRight());
+
+        // Logical operators (short-circuit)
+        if (op.equals("&&") || op.equals("||")) {
+            generateExpression(mv, bon.getLeft(), symbolTable);
+            if (leftType == MammothType.INT64) { mv.visitInsn(Opcodes.LCONST_0); mv.visitInsn(Opcodes.LCMP); }
+            Label skipLabel = new Label();
+            Label endLabel = new Label();
+            mv.visitJumpInsn(op.equals("&&") ? Opcodes.IFEQ : Opcodes.IFNE, skipLabel);
+            generateExpression(mv, bon.getRight(), symbolTable);
+            if (rightType == MammothType.INT64) { mv.visitInsn(Opcodes.LCONST_0); mv.visitInsn(Opcodes.LCMP); }
+            mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+            mv.visitLabel(skipLabel);
+            mv.visitInsn(op.equals("&&") ? Opcodes.ICONST_0 : Opcodes.ICONST_1);
+            mv.visitLabel(endLabel);
+            return;
+        }
+
+        // NOT operator
+        if (op.equals("!")) {
+            generateExpression(mv, bon.getLeft(), symbolTable);
+            Label falseLabel = new Label();
+            Label endLabel = new Label();
+            mv.visitJumpInsn(Opcodes.IFEQ, falseLabel);
+            mv.visitInsn(Opcodes.ICONST_0);
+            mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+            mv.visitLabel(falseLabel);
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitLabel(endLabel);
+            return;
+        }
+
+        // Comparison operators: ==, !=, <, >, <=, >=
+        if (op.equals("==") || op.equals("!=") || op.equals("<") || op.equals(">") || op.equals("<=") || op.equals(">=")) {
+            boolean isLong = leftType == MammothType.INT64 || rightType == MammothType.INT64;
+            boolean isDouble = leftType == MammothType.FLOAT64 || rightType == MammothType.FLOAT64;
+            generateExpression(mv, bon.getLeft(), symbolTable);
+            if (isLong && leftType != MammothType.INT64) mv.visitInsn(Opcodes.I2L);
+            if (isDouble && leftType != MammothType.FLOAT64) mv.visitInsn(Opcodes.I2D);
+            generateExpression(mv, bon.getRight(), symbolTable);
+            if (isLong && rightType != MammothType.INT64) mv.visitInsn(Opcodes.I2L);
+            if (isDouble && rightType != MammothType.FLOAT64) mv.visitInsn(Opcodes.I2D);
+            if (isLong) { mv.visitInsn(Opcodes.LCMP); }
+            else if (isDouble) { mv.visitInsn(Opcodes.DCMPG); }
+            Label trueLabel = new Label();
+            Label endLabel = new Label();
+            int cmpOp = switch (op) {
+                case "==" -> isLong || isDouble ? Opcodes.IFEQ : Opcodes.IF_ICMPEQ;
+                case "!=" -> isLong || isDouble ? Opcodes.IFNE : Opcodes.IF_ICMPNE;
+                case "<" -> isLong || isDouble ? Opcodes.IFLT : Opcodes.IF_ICMPLT;
+                case ">" -> isLong || isDouble ? Opcodes.IFGT : Opcodes.IF_ICMPGT;
+                case "<=" -> isLong || isDouble ? Opcodes.IFLE : Opcodes.IF_ICMPLE;
+                default -> isLong || isDouble ? Opcodes.IFGE : Opcodes.IF_ICMPGE;
+            };
+            mv.visitJumpInsn(cmpOp, trueLabel);
+            mv.visitInsn(Opcodes.ICONST_0);
+            mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+            mv.visitLabel(trueLabel);
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitLabel(endLabel);
+            return;
+        }
+
+        generateExpression(mv, bon.getLeft(), symbolTable);
+        // Cast left if needed for matching right type
+        if (rightType == MammothType.INT64 && leftType != MammothType.INT64) mv.visitInsn(Opcodes.I2L);
+        if (rightType == MammothType.FLOAT64 && leftType != MammothType.FLOAT64) mv.visitInsn(Opcodes.I2D);
+        generateExpression(mv, bon.getRight(), symbolTable);
+        // Cast right if needed for matching left type
+        if (leftType == MammothType.INT64 && rightType != MammothType.INT64) mv.visitInsn(Opcodes.I2L);
+        if (leftType == MammothType.FLOAT64 && rightType != MammothType.FLOAT64) mv.visitInsn(Opcodes.I2D);
 
         if (leftType == MammothType.STRING && op.equals("+")) {
             mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "concat",
@@ -595,7 +885,7 @@ public class BytecodeGenerator {
                 try { return super.getCommonSuperClass(t1, t2); } catch (Exception e) { return "java/lang/Object"; }
             }
         };
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC | Opcodes.ACC_INTERFACE | Opcodes.ACC_ABSTRACT,
+        cw.visit(Opcodes.V1_5, Opcodes.ACC_PUBLIC | Opcodes.ACC_INTERFACE | Opcodes.ACC_ABSTRACT,
             internalName, null, "java/lang/Object", null);
 
         StringBuilder methodDesc = new StringBuilder("(");
@@ -627,7 +917,7 @@ public class BytecodeGenerator {
             }
         };
         String[] interfaces = {fnInterfaceName};
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, internalName, null,
+        cw.visit(Opcodes.V1_5, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, internalName, null,
             "java/lang/Object", interfaces);
 
         List<CaptureItem> captures = closure.getCaptures();
@@ -721,7 +1011,7 @@ public class BytecodeGenerator {
         if (retType == MammothType.VOID) {
             mv.visitInsn(Opcodes.RETURN);
         }
-        mv.visitMaxs(10, 20);
+        mv.visitMaxs(100, 100);
         mv.visitEnd();
     }
 
@@ -880,7 +1170,12 @@ public class BytecodeGenerator {
             return MammothType.STRING;
         }
         if (expr instanceof BinaryOpNode bon) {
-            return getExprType(bon.getLeft());
+            String op = bon.getOp();
+            if (op.equals("==") || op.equals("!=") || op.equals("<") || op.equals(">") ||
+                op.equals("<=") || op.equals(">=") || op.equals("&&") || op.equals("||") || op.equals("!")) {
+                return MammothType.INT32; // comparison/logical result is always boolean (int)
+            }
+            return getExprType(bon.getLeft()); // propagate left type
         }
         if (expr instanceof CastNode cn) {
             return MammothType.fromTypeName(cn.getTargetType().getBaseTypeName());

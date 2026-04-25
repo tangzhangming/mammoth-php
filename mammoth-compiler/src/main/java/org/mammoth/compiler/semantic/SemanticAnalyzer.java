@@ -133,6 +133,41 @@ public class SemanticAnalyzer {
             analyzeTryNode(tn);
         } else if (stmt instanceof ThrowNode tn) {
             resolveExpression(tn.getExpression());
+        } else if (stmt instanceof IfNode in) {
+            resolveExpression(in.getCondition());
+            if (in.getThenBranch() != null) analyzeStatement(in.getThenBranch());
+            if (in.getElseBranch() != null) analyzeStatement(in.getElseBranch());
+        } else if (stmt instanceof WhileNode wn) {
+            resolveExpression(wn.getCondition());
+            if (wn.getBody() != null) analyzeStatement(wn.getBody());
+        } else if (stmt instanceof DoWhileNode dw) {
+            if (dw.getBody() != null) analyzeStatement(dw.getBody());
+            resolveExpression(dw.getCondition());
+        } else if (stmt instanceof ForNode fn) {
+            if (fn.getInit() != null) analyzeStatement(fn.getInit());
+            if (fn.getCondition() != null) resolveExpression(fn.getCondition());
+            if (fn.getUpdate() != null) resolveExpression(fn.getUpdate());
+            if (fn.getBody() != null) analyzeStatement(fn.getBody());
+        } else if (stmt instanceof ForEachNode fen) {
+            resolveExpression(fen.getIterable());
+            // register loop variables
+            symbolTable.pushScope();
+            if (fen.getKeyVar() != null) {
+                Symbol k = new Symbol(fen.getKeyVar(), Symbol.SymbolKind.VARIABLE);
+                k.setResolvedType(MammothType.STRING);
+                k.setLocalIndex(symbolTable.allocateLocalVar(false));
+                k.setInitialized(true);
+                symbolTable.define(k);
+            }
+            Symbol v = new Symbol(fen.getValueVar(), Symbol.SymbolKind.VARIABLE);
+            v.setResolvedType(MammothType.STRING);
+            v.setLocalIndex(symbolTable.allocateLocalVar(false));
+            v.setInitialized(true);
+            symbolTable.define(v);
+            if (fen.getBody() != null) analyzeStatement(fen.getBody());
+            symbolTable.popScope();
+        } else if (stmt instanceof BreakNode || stmt instanceof ContinueNode) {
+            // No expression to resolve
         }
     }
 

@@ -36,14 +36,35 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
     public ClassNode visitClassDeclaration(MammothParser.ClassDeclarationContext ctx) {
         String name = ctx.identifier().getText();
         ClassNode classNode = new ClassNode(ctx.start, name);
-        if (ctx.visibility() != null) {
-            classNode.setVisibility(ctx.visibility().getText());
+
+        for (MammothParser.AnnotationUsageContext annCtx : ctx.annotationUsage()) {
+            classNode.addAnnotation(visitAnnotationUsage(annCtx));
         }
-        for (MammothParser.ClassMemberContext member : ctx.classMember()) {
-            if (member.fieldDeclaration() != null) {
-                classNode.addField(visitFieldDeclaration(member.fieldDeclaration()));
-            } else if (member.methodDeclaration() != null) {
-                classNode.addMethod(visitMethodDeclaration(member.methodDeclaration()));
+        if (ctx.visibility() != null) classNode.setVisibility(ctx.visibility().getText());
+
+        // Check if annotation class (first alternative)
+        classNode.setAnnotation(ctx.ANNOTATION() != null);
+
+        if (classNode.isAnnotation()) {
+            // Annotation class: members come from annotationBody
+            if (ctx.annotationBody() != null) {
+                for (MammothParser.AnnotationMemberContext am : ctx.annotationBody().annotationMember()) {
+                    String memberName = am.VARIABLE().getText();
+                    FieldNode field = new FieldNode(am.start, memberName);
+                    if (am.visibility() != null) field.setVisibility(am.visibility().getText());
+                    if (am.type() != null) field.setType(visitType(am.type()));
+                    if (am.expression() != null) field.setInitializer(parseExpression(am.expression()));
+                    classNode.addField(field);
+                }
+            }
+        } else {
+            // Regular class: members from classMember*
+            for (MammothParser.ClassMemberContext member : ctx.classMember()) {
+                if (member.fieldDeclaration() != null) {
+                    classNode.addField(visitFieldDeclaration(member.fieldDeclaration()));
+                } else if (member.methodDeclaration() != null) {
+                    classNode.addMethod(visitMethodDeclaration(member.methodDeclaration()));
+                }
             }
         }
         return classNode;
@@ -54,15 +75,13 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         MammothParser.VariableDeclaratorContext decl = ctx.variableDeclarator();
         String varName = decl.VARIABLE().getText();
         FieldNode field = new FieldNode(ctx.start, varName);
-        if (ctx.visibility() != null) {
-            field.setVisibility(ctx.visibility().getText());
+
+        for (MammothParser.AnnotationUsageContext annCtx : ctx.annotationUsage()) {
+            field.addAnnotation(visitAnnotationUsage(annCtx));
         }
-        if (ctx.type() != null) {
-            field.setType(visitType(ctx.type()));
-        }
-        if (decl.expression() != null) {
-            field.setInitializer(parseExpression(decl.expression()));
-        }
+        if (ctx.visibility() != null) field.setVisibility(ctx.visibility().getText());
+        if (ctx.type() != null) field.setType(visitType(ctx.type()));
+        if (decl.expression() != null) field.setInitializer(parseExpression(decl.expression()));
         return field;
     }
 
@@ -70,9 +89,10 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
     public MethodNode visitMethodDeclaration(MammothParser.MethodDeclarationContext ctx) {
         String name = ctx.identifier().getText();
         MethodNode method = new MethodNode(ctx.start, name);
-        if (ctx.visibility() != null) {
-            method.setVisibility(ctx.visibility().getText());
+        for (MammothParser.AnnotationUsageContext annCtx : ctx.annotationUsage()) {
+            method.addAnnotation(visitAnnotationUsage(annCtx));
         }
+        if (ctx.visibility() != null) method.setVisibility(ctx.visibility().getText());
         method.setStatic(ctx.STATIC() != null);
         if (ctx.parameters() != null) {
             for (MammothParser.ParameterContext p : ctx.parameters().parameter()) {
@@ -92,12 +112,11 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
     public ParameterNode visitParameter(MammothParser.ParameterContext ctx) {
         String name = ctx.VARIABLE().getText();
         ParameterNode param = new ParameterNode(ctx.start, name);
-        if (ctx.type() != null) {
-            param.setType(visitType(ctx.type()));
+        for (MammothParser.AnnotationUsageContext annCtx : ctx.annotationUsage()) {
+            param.addAnnotation(visitAnnotationUsage(annCtx));
         }
-        if (ctx.expression() != null) {
-            param.setDefaultValue(parseExpression(ctx.expression()));
-        }
+        if (ctx.type() != null) param.setType(visitType(ctx.type()));
+        if (ctx.expression() != null) param.setDefaultValue(parseExpression(ctx.expression()));
         return param;
     }
 
@@ -145,31 +164,67 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         return localVar;
     }
 
+    // ---- Control flow visitors ----
+
     @Override
-    public TryNode visitTryStatement(MammothParser.TryStatementContext ctx) {
-        TryNode tryNode = new TryNode(ctx.start.getLine(), ctx.start.getCharPositionInLine());
-        tryNode.setTryBlock(visitBlock(ctx.tryBlock));
-
-        for (MammothParser.CatchClauseContext cc : ctx.catchClause()) {
-            String exceptionTypeName = cc.qualifiedName().getText();
-            CatchClause clause = new CatchClause(
-                new TypeNode(exceptionTypeName, false),
-                cc.VARIABLE().getText()
-            );
-            clause.setBody(visitBlock(cc.block()));
-            tryNode.addCatchClause(clause);
-        }
-
-        if (ctx.finallyBlock != null) {
-            tryNode.setFinallyBlock(visitBlock(ctx.finallyBlock.block()));
-        }
-
-        return tryNode;
+    public IfNode visitIfStatement(MammothParser.IfStatementContext ctx) {
+        ExpressionNode condition = parseExpression(ctx.expression());
+        StatementNode thenBranch = (StatementNode) visit(ctx.statement(0));
+        StatementNode elseBranch = ctx.ELSE() != null ? (StatementNode) visit(ctx.statement(1)) : null;
+        return new IfNode(ctx.start, condition, thenBranch, elseBranch);
     }
 
     @Override
-    public ThrowNode visitThrowStatement(MammothParser.ThrowStatementContext ctx) {
-        return new ThrowNode(ctx.start, parseExpression(ctx.expression()));
+    public WhileNode visitWhileStatement(MammothParser.WhileStatementContext ctx) {
+        return new WhileNode(ctx.start, parseExpression(ctx.expression()), (StatementNode) visit(ctx.statement()));
+    }
+
+    @Override
+    public DoWhileNode visitDoWhileStatement(MammothParser.DoWhileStatementContext ctx) {
+        return new DoWhileNode(ctx.start, parseExpression(ctx.expression()), (StatementNode) visit(ctx.statement()));
+    }
+
+    @Override
+    public ForNode visitForStatement(MammothParser.ForStatementContext ctx) {
+        LocalVarNode init = null;
+        ExpressionNode initExpr = null;
+        if (ctx.forInit() != null) {
+            if (ctx.forInit().type() != null) {
+                String varName = ctx.forInit().variableDeclarator().VARIABLE().getText();
+                init = new LocalVarNode(ctx.start, varName);
+                init.setType(visitType(ctx.forInit().type()));
+                if (ctx.forInit().variableDeclarator().expression() != null) {
+                    init.setInitializer(parseExpression(ctx.forInit().variableDeclarator().expression()));
+                }
+            } else if (ctx.forInit().expression() != null && !ctx.forInit().expression().isEmpty()) {
+                initExpr = parseExpression(ctx.forInit().expression(0));
+            }
+        }
+        ExpressionNode condition = ctx.expression() != null ? parseExpression(ctx.expression()) : null;
+        ExpressionNode update = ctx.forUpdate() != null && !ctx.forUpdate().expression().isEmpty()
+            ? parseExpression(ctx.forUpdate().expression(0)) : null;
+        StatementNode body = (StatementNode) visit(ctx.statement());
+        return new ForNode(ctx.start, init != null ? init : (initExpr != null ? new ExpressionStatementNode(initExpr) : null),
+            condition, update, body);
+    }
+
+    @Override
+    public ForEachNode visitForEachStatement(MammothParser.ForEachStatementContext ctx) {
+        ExpressionNode iterable = parseExpression(ctx.expression());
+        String valueVar = ctx.VARIABLE(0).getText();
+        String keyVar = ctx.VARIABLE().size() > 1 ? ctx.VARIABLE(1).getText() : null;
+        StatementNode body = (StatementNode) visit(ctx.statement());
+        return new ForEachNode(ctx.start, iterable, keyVar, valueVar, body);
+    }
+
+    @Override
+    public BreakNode visitBreakStatement(MammothParser.BreakStatementContext ctx) {
+        return new BreakNode(ctx.start);
+    }
+
+    @Override
+    public ContinueNode visitContinueStatement(MammothParser.ContinueStatementContext ctx) {
+        return new ContinueNode(ctx.start);
     }
 
     // ---- Label methods for expression rule ----
@@ -187,10 +242,14 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
     }
 
     @Override
-    public ExpressionNode visitUnaryMinusExpr(MammothParser.UnaryMinusExprContext ctx) {
-        LiteralNode zero = new LiteralNode(ctx.start, 0, "int");
+    public ExpressionNode visitUnaryExpr(MammothParser.UnaryExprContext ctx) {
         ExpressionNode expr = parseExpression(ctx.expression());
-        return new BinaryOpNode(ctx.start, zero, "-", expr);
+        if (ctx.MINUS() != null) {
+            LiteralNode zero = new LiteralNode(ctx.start, 0, "int");
+            return new BinaryOpNode(ctx.start, zero, "-", expr);
+        } else {
+            return new BinaryOpNode(ctx.start, expr, "!", null);
+        }
     }
 
     @Override
@@ -213,6 +272,30 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         VariableNode target = new VariableNode(varToken, ctx.VARIABLE().getText());
         ExpressionNode value = parseExpression(ctx.expression());
         return new AssignmentNode(ctx.start, target, value);
+    }
+
+    @Override
+    public ExpressionNode visitComparisonExpr(MammothParser.ComparisonExprContext ctx) {
+        return new BinaryOpNode(ctx.start,
+            parseExpression(ctx.expression(0)), ctx.op.getText(), parseExpression(ctx.expression(1)));
+    }
+
+    @Override
+    public ExpressionNode visitEqualityExpr(MammothParser.EqualityExprContext ctx) {
+        return new BinaryOpNode(ctx.start,
+            parseExpression(ctx.expression(0)), ctx.op.getText(), parseExpression(ctx.expression(1)));
+    }
+
+    @Override
+    public ExpressionNode visitAndExpr(MammothParser.AndExprContext ctx) {
+        return new BinaryOpNode(ctx.start,
+            parseExpression(ctx.expression(0)), "&&", parseExpression(ctx.expression(1)));
+    }
+
+    @Override
+    public ExpressionNode visitOrExpr(MammothParser.OrExprContext ctx) {
+        return new BinaryOpNode(ctx.start,
+            parseExpression(ctx.expression(0)), "||", parseExpression(ctx.expression(1)));
     }
 
     // ---- Helper for expression dispatching ----
@@ -238,6 +321,9 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         }
         if (ctx.VARIABLE() != null) {
             return new VariableNode(ctx.VARIABLE().getSymbol(), ctx.VARIABLE().getText());
+        }
+        if (ctx.IDENTIFIER() != null) {
+            return new VariableNode(ctx.IDENTIFIER().getSymbol(), ctx.IDENTIFIER().getText());
         }
         if (ctx.expression() != null) {
             return parseExpression(ctx.expression());
@@ -341,5 +427,25 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
             }
         }
         return node;
+    }
+
+    @Override
+    public AnnotationNode visitAnnotationUsage(MammothParser.AnnotationUsageContext ctx) {
+        String typeName = ctx.qualifiedName().getText();
+        AnnotationNode ann = new AnnotationNode(ctx.start, typeName);
+
+        if (ctx.annotationTarget() != null) {
+            ann.setTarget(ctx.annotationTarget().getText());
+        }
+
+        if (ctx.annotationArgs() != null) {
+            for (MammothParser.AnnotationArgContext argCtx : ctx.annotationArgs().annotationArg()) {
+                String argName = argCtx.IDENTIFIER() != null ? argCtx.IDENTIFIER().getText() : null;
+                ExpressionNode value = parseExpression(argCtx.expression());
+                ann.addArg(new AnnotationNode.AnnotationArg(argName, value));
+            }
+        }
+
+        return ann;
     }
 }

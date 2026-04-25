@@ -21,7 +21,16 @@ importDeclaration
     ;
 
 classDeclaration
-    : visibility? CLASS identifier LBRACE classMember* RBRACE
+    : annotationUsage* visibility? ANNOTATION CLASS identifier annotationBody
+    | annotationUsage* visibility? CLASS identifier LBRACE classMember* RBRACE
+    ;
+
+annotationBody
+    : LBRACE annotationMember* RBRACE
+    ;
+
+annotationMember
+    : visibility? type VARIABLE (ASSIGN expression)? SEMICOLON
     ;
 
 classMember
@@ -30,7 +39,7 @@ classMember
     ;
 
 fieldDeclaration
-    : visibility? type? variableDeclarator SEMICOLON
+    : annotationUsage* visibility? type? variableDeclarator SEMICOLON
     ;
 
 variableDeclarator
@@ -38,7 +47,7 @@ variableDeclarator
     ;
 
 methodDeclaration
-    : visibility? STATIC? FUNCTION identifier LPAREN parameters? RPAREN returnType? block
+    : annotationUsage* visibility? STATIC? FUNCTION identifier LPAREN parameters? RPAREN returnType? block
     ;
 
 returnType
@@ -50,7 +59,7 @@ parameters
     ;
 
 parameter
-    : type? VARIABLE (ASSIGN expression)?
+    : annotationUsage* type? VARIABLE (ASSIGN expression)?
     ;
 
 type
@@ -88,6 +97,13 @@ statement
     | localVarDeclaration
     | tryStatement
     | throwStatement
+    | ifStatement
+    | whileStatement
+    | doWhileStatement
+    | forStatement
+    | forEachStatement
+    | breakStatement
+    | continueStatement
     | block
     ;
 
@@ -111,6 +127,63 @@ throwStatement
     : THROW expression SEMICOLON
     ;
 
+// ---- Annotation rules ----
+
+annotationUsage
+    : AT (annotationTarget COLON)? qualifiedName (LPAREN annotationArgs? RPAREN)?
+    ;
+
+annotationTarget
+    : FIELD_TARGET | GET_TARGET | SET_TARGET
+    ;
+
+annotationArgs
+    : annotationArg (COMMA annotationArg)*
+    ;
+
+annotationArg
+    : (IDENTIFIER ASSIGN)? expression
+    ;
+
+// ---- Control flow ----
+
+ifStatement
+    : IF LPAREN expression RPAREN statement (ELSE statement)?
+    ;
+
+whileStatement
+    : WHILE LPAREN expression RPAREN statement
+    ;
+
+doWhileStatement
+    : DO statement WHILE LPAREN expression RPAREN SEMICOLON
+    ;
+
+forStatement
+    : FOR LPAREN forInit? SEMICOLON expression? SEMICOLON forUpdate? RPAREN statement
+    ;
+
+forInit
+    : type variableDeclarator
+    | expression (COMMA expression)*
+    ;
+
+forUpdate
+    : expression (COMMA expression)*
+    ;
+
+forEachStatement
+    : FOREACH LPAREN expression AS VARIABLE (ARROW VARIABLE)? RPAREN statement
+    ;
+
+breakStatement
+    : BREAK SEMICOLON
+    ;
+
+continueStatement
+    : CONTINUE SEMICOLON
+    ;
+
 expressionStatement
     : expression SEMICOLON
     ;
@@ -122,9 +195,13 @@ returnStatement
 expression
     : primary                                                      #primaryExpr
     | LPAREN type RPAREN expression                                #castExpr
-    | MINUS expression                                             #unaryMinusExpr
+    | (MINUS | NOT) expression                                     #unaryExpr
     | expression op=(MULTIPLY | DIVIDE | MODULO) expression        #multiplicativeExpr
     | expression op=(PLUS | MINUS) expression                      #additiveExpr
+    | expression op=(LT | GT | LTE | GTE) expression               #comparisonExpr
+    | expression op=(EQ | NEQ) expression                          #equalityExpr
+    | expression AND expression                                    #andExpr
+    | expression OR expression                                     #orExpr
     | VARIABLE ASSIGN expression                                   #assignmentExpr
     ;
 
@@ -134,6 +211,7 @@ primary
     | newExpression
     | callExpression
     | VARIABLE
+    | IDENTIFIER
     | LPAREN expression RPAREN
     ;
 
@@ -217,6 +295,19 @@ CATCH       : 'catch';
 FINALLY     : 'finally';
 THROW       : 'throw';
 NEW         : 'new';
+ANNOTATION  : 'annotation';
+FIELD_TARGET: 'field';
+GET_TARGET  : 'get';
+SET_TARGET  : 'set';
+IF          : 'if';
+ELSE        : 'else';
+WHILE       : 'while';
+DO          : 'do';
+FOR         : 'for';
+FOREACH     : 'foreach';
+AS          : 'as';
+BREAK       : 'break';
+CONTINUE    : 'continue';
 
 // Builtin functions
 PRINT       : 'print';
@@ -274,6 +365,17 @@ COLON       : ':';
 COMMA       : ',';
 DOT         : '.';
 QUESTION    : '?';
+AT          : '@';
+EQ          : '==';
+NEQ         : '!=';
+LTE         : '<=';
+GTE         : '>=';
+LT          : '<';
+GT          : '>';
+AND         : '&&';
+OR          : '||';
+NOT         : '!';
+ARROW       : '=>';
 
 // Comments
 LINE_COMMENT    : '//' ~[\r\n]* -> skip;
