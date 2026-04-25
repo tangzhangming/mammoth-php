@@ -23,6 +23,11 @@ importDeclaration
 classDeclaration
     : annotationUsage* visibility? ANNOTATION CLASS identifier annotationBody
     | annotationUsage* visibility? CLASS identifier LBRACE classMember* RBRACE
+    | annotationUsage* visibility? ENUM identifier LBRACE enumConstantList RBRACE
+    ;
+
+enumConstantList
+    : IDENTIFIER (COMMA IDENTIFIER)* COMMA? SEMICOLON? classMember*
     ;
 
 annotationBody
@@ -208,9 +213,11 @@ expression
 primary
     : literal
     | closureExpression
+    | arrowExpression
     | newExpression
     | callExpression
     | VARIABLE
+    | qualifiedName
     | IDENTIFIER
     | LPAREN expression RPAREN
     ;
@@ -231,6 +238,10 @@ closureExpression
     : FUNCTION LPAREN parameters? RPAREN captureClause? returnType? block
     ;
 
+arrowExpression
+    : FN LPAREN parameters? RPAREN ARROW expression
+    ;
+
 captureClause
     : USE LPAREN captureList RPAREN
     ;
@@ -244,7 +255,12 @@ captureItem
     ;
 
 arguments
-    : expression (COMMA expression)*
+    : argument (COMMA argument)*
+    ;
+
+argument
+    : IDENTIFIER COLON expression   #namedArgument
+    | expression                    #positionalArgument
     ;
 
 literal
@@ -283,11 +299,13 @@ NAMESPACE   : 'namespace';
 IMPORT      : 'import';
 USE         : 'use';
 CLASS       : 'class';
+ENUM        : 'enum';
 PUBLIC      : 'public';
 PROTECTED   : 'protected';
 PRIVATE     : 'private';
 STATIC      : 'static';
 FUNCTION    : 'function';
+FN          : 'fn';
 RETURN      : 'return';
 NULL        : 'null';
 TRY         : 'try';

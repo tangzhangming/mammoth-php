@@ -5,6 +5,11 @@ import org.mammoth.compiler.ast.*;
 import org.mammoth.grammar.MammothBaseVisitor;
 import org.mammoth.grammar.MammothParser;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 public class AstBuilder extends MammothBaseVisitor<Object> {
 
     @Override
@@ -45,7 +50,24 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         // Check if annotation class (first alternative)
         classNode.setAnnotation(ctx.ANNOTATION() != null);
 
-        if (classNode.isAnnotation()) {
+        // Check if enum class
+        classNode.setEnum(ctx.ENUM() != null);
+
+        if (classNode.isEnum()) {
+            // Enum class
+            MammothParser.EnumConstantListContext ecl = ctx.enumConstantList();
+            for (org.antlr.v4.runtime.tree.TerminalNode id : ecl.IDENTIFIER()) {
+                classNode.addEnumConstant(id.getText());
+            }
+            // Handle class members in enum (methods etc.)
+            for (MammothParser.ClassMemberContext member : ecl.classMember()) {
+                if (member.fieldDeclaration() != null) {
+                    classNode.addField(visitFieldDeclaration(member.fieldDeclaration()));
+                } else if (member.methodDeclaration() != null) {
+                    classNode.addMethod(visitMethodDeclaration(member.methodDeclaration()));
+                }
+            }
+        } else if (classNode.isAnnotation()) {
             // Annotation class: members come from annotationBody
             if (ctx.annotationBody() != null) {
                 for (MammothParser.AnnotationMemberContext am : ctx.annotationBody().annotationMember()) {
@@ -313,6 +335,9 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         if (ctx.closureExpression() != null) {
             return visitClosureExpression(ctx.closureExpression());
         }
+        if (ctx.arrowExpression() != null) {
+            return visitArrowExpression(ctx.arrowExpression());
+        }
         if (ctx.newExpression() != null) {
             return visitNewExpression(ctx.newExpression());
         }
@@ -321,6 +346,9 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         }
         if (ctx.VARIABLE() != null) {
             return new VariableNode(ctx.VARIABLE().getSymbol(), ctx.VARIABLE().getText());
+        }
+        if (ctx.qualifiedName() != null) {
+            return new VariableNode(ctx.qualifiedName().start, ctx.qualifiedName().getText());
         }
         if (ctx.IDENTIFIER() != null) {
             return new VariableNode(ctx.IDENTIFIER().getSymbol(), ctx.IDENTIFIER().getText());
@@ -346,18 +374,28 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
             call.setBuiltinPrint(true);
         }
         if (ctx.arguments() != null) {
-            for (MammothParser.ExpressionContext expr : ctx.arguments().expression()) {
-                call.addArgument(parseExpression(expr));
+            for (MammothParser.ArgumentContext argCtx : ctx.arguments().argument()) {
+                if (argCtx instanceof MammothParser.NamedArgumentContext nac) {
+                    call.addNamedArgument(nac.IDENTIFIER().getText(), parseExpression(nac.expression()));
+                } else if (argCtx instanceof MammothParser.PositionalArgumentContext pac) {
+                    call.addArgument(parseExpression(pac.expression()));
+                }
             }
         }
         return call;
     }
 
     @Override
-    public LiteralNode visitLiteral(MammothParser.LiteralContext ctx) {
+    public ExpressionNode visitLiteral(MammothParser.LiteralContext ctx) {
         if (ctx.STRING_LITERAL() != null) {
             String text = ctx.STRING_LITERAL().getText();
             String value = text.substring(1, text.length() - 1);
+
+            // String interpolation: "Hello $name, age: $age"
+            if (value.contains("$")) {
+                return buildInterpolatedString(ctx.start, value);
+            }
+
             return new LiteralNode(ctx.start, value, "string");
         }
         if (ctx.INTEGER_LITERAL() != null) {
@@ -387,6 +425,28 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
             return new LiteralNode(ctx.start, null, "null");
         }
         throw new RuntimeException("Unknown literal");
+    }
+
+    @Override
+    public ClosureNode visitArrowExpression(MammothParser.ArrowExpressionContext ctx) {
+        ClosureNode closure = new ClosureNode(ctx.start);
+        closure.setArrowFunction(true);
+
+        if (ctx.parameters() != null) {
+            for (MammothParser.ParameterContext p : ctx.parameters().parameter()) {
+                closure.addParameter(visitParameter(p));
+            }
+        }
+
+        // Wrap expression body in a block with return
+        BlockNode body = new BlockNode();
+        body.addStatement(new ReturnNode(ctx.start, parseExpression(ctx.expression())));
+        closure.setBody(body);
+
+        // Return type: let bytecode generator infer from expression body
+        closure.setReturnType(null);
+
+        return closure;
     }
 
     @Override
@@ -422,11 +482,44 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         String className = ctx.qualifiedName().getText();
         NewNode node = new NewNode(ctx.start, className);
         if (ctx.arguments() != null) {
-            for (MammothParser.ExpressionContext expr : ctx.arguments().expression()) {
-                node.addArgument(parseExpression(expr));
+            for (MammothParser.ArgumentContext argCtx : ctx.arguments().argument()) {
+                if (argCtx instanceof MammothParser.NamedArgumentContext nac) {
+                    // Named args not supported for new expressions, treat as positional
+                    node.addArgument(parseExpression(nac.expression()));
+                } else if (argCtx instanceof MammothParser.PositionalArgumentContext pac) {
+                    node.addArgument(parseExpression(pac.expression()));
+                }
             }
         }
         return node;
+    }
+
+    private static final Pattern VAR_IN_STR = Pattern.compile("\\$[a-zA-Z_][a-zA-Z_0-9]*");
+
+    private ExpressionNode buildInterpolatedString(Token token, String s) {
+        Matcher m = VAR_IN_STR.matcher(s);
+        List<ExpressionNode> parts = new ArrayList<>();
+        int lastEnd = 0;
+        while (m.find()) {
+            String before = s.substring(lastEnd, m.start());
+            if (!before.isEmpty()) {
+                parts.add(new LiteralNode(token, before, "string"));
+            }
+            parts.add(new VariableNode(token, m.group()));
+            lastEnd = m.end();
+        }
+        if (lastEnd < s.length()) {
+            parts.add(new LiteralNode(token, s.substring(lastEnd), "string"));
+        }
+        if (parts.isEmpty()) {
+            return new LiteralNode(token, "", "string");
+        }
+        // Build left-associative concatenation tree
+        ExpressionNode result = parts.get(0);
+        for (int i = 1; i < parts.size(); i++) {
+            result = new BinaryOpNode(token, result, "+", parts.get(i));
+        }
+        return result;
     }
 
     @Override

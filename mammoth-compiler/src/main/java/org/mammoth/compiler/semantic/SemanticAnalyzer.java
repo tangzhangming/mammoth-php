@@ -258,6 +258,11 @@ public class SemanticAnalyzer {
     }
 
     private void analyzeClosure(ClosureNode closure) {
+        // For arrow functions, auto-capture external variables before analysis
+        if (closure.isArrowFunction() && closure.getCaptures().isEmpty()) {
+            autoCaptureVariables(closure);
+        }
+
         // Analyze closure parameters
         for (ParameterNode param : closure.getParameters()) {
             if (param.getType() != null) {
@@ -325,7 +330,107 @@ public class SemanticAnalyzer {
             analyzeBlock(closure.getBody());
         }
 
+        // Arrow function: infer return type from expression body
+        if (closure.isArrowFunction() && closure.getReturnType() == null) {
+            inferArrowReturnType(closure);
+        }
+
         symbolTable.popScope();
+    }
+
+    private void inferArrowReturnType(ClosureNode closure) {
+        if (closure.getBody() != null) {
+            for (StatementNode stmt : closure.getBody().getStatements()) {
+                if (stmt instanceof ReturnNode rn && rn.hasValue()) {
+                    ExpressionNode val = rn.getValue();
+                    MammothType mt = inferExprType(val);
+                    closure.setReturnType(new TypeNode(
+                        mt != null ? mt.getMammothName() : "void", false));
+                    return;
+                }
+            }
+        }
+        closure.setReturnType(new TypeNode("void", false));
+    }
+
+    private MammothType inferExprType(ExpressionNode expr) {
+        if (expr instanceof LiteralNode ln) {
+            return MammothType.inferFromLiteral(ln.getTypeHint());
+        }
+        if (expr instanceof VariableNode vn) {
+            if (vn.getResolvedType() != null) return vn.getResolvedType();
+            // Check if it's a captured variable
+            Symbol sym = symbolTable.resolve(vn.getName());
+            if (sym != null && sym.getResolvedType() != null) return sym.getResolvedType();
+        }
+        if (expr instanceof BinaryOpNode bon) {
+            MammothType lt = inferExprType(bon.getLeft());
+            MammothType rt = inferExprType(bon.getRight());
+            if (lt == rt) return lt;
+            if (lt == MammothType.INT64 || rt == MammothType.INT64) return MammothType.INT64;
+            if (lt == MammothType.FLOAT64 || rt == MammothType.FLOAT64) return MammothType.FLOAT64;
+            return lt != null ? lt : rt;
+        }
+        if (expr instanceof MethodCallNode mcn) {
+            if (mcn.isBuiltinPrint()) return MammothType.VOID;
+            return MammothType.VOID;
+        }
+        if (expr instanceof AssignmentNode an) {
+            return inferExprType(an.getValue());
+        }
+        return MammothType.STRING; // default
+    }
+
+    private void autoCaptureVariables(ClosureNode closure) {
+        java.util.Set<String> paramNames = new java.util.HashSet<>();
+        for (ParameterNode p : closure.getParameters()) {
+            paramNames.add(p.getName());
+        }
+        java.util.Set<String> externalVars = new java.util.LinkedHashSet<>();
+        collectExternalVars(closure.getBody(), externalVars, paramNames);
+
+        for (String varName : externalVars) {
+            Symbol sym = symbolTable.resolve(varName);
+            if (sym != null) {
+                closure.addCapture(new CaptureItem(varName, false));
+            }
+        }
+    }
+
+    private void collectExternalVars(StatementNode stmt, java.util.Set<String> vars, java.util.Set<String> skip) {
+        if (stmt instanceof ExpressionStatementNode es) {
+            collectExprVars(es.getExpression(), vars, skip);
+        } else if (stmt instanceof ReturnNode rn && rn.hasValue()) {
+            collectExprVars(rn.getValue(), vars, skip);
+        } else if (stmt instanceof BlockNode bn) {
+            for (StatementNode s : bn.getStatements()) {
+                collectExternalVars(s, vars, skip);
+            }
+        }
+    }
+
+    private void collectExprVars(ExpressionNode expr, java.util.Set<String> vars, java.util.Set<String> skip) {
+        if (expr instanceof VariableNode vn) {
+            String name = vn.getName();
+            if (!skip.contains(name) && !name.contains(".")) {
+                vars.add(name);
+            }
+        } else if (expr instanceof BinaryOpNode bon) {
+            collectExprVars(bon.getLeft(), vars, skip);
+            collectExprVars(bon.getRight(), vars, skip);
+        } else if (expr instanceof AssignmentNode an) {
+            collectExprVars(an.getValue(), vars, skip);
+        } else if (expr instanceof MethodCallNode mcn) {
+            for (ExpressionNode arg : mcn.getArguments()) {
+                collectExprVars(arg, vars, skip);
+            }
+            if (mcn.isVariableCall()) {
+                String n = mcn.getMethodName();
+                if (!skip.contains(n) && !n.contains(".")) vars.add(n);
+            }
+        } else if (expr instanceof CastNode cn) {
+            collectExprVars(cn.getExpression(), vars, skip);
+        }
     }
 
     private void resolveVariable(VariableNode vn) {

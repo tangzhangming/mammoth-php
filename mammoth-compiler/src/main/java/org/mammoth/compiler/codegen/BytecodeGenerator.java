@@ -18,6 +18,7 @@ public class BytecodeGenerator {
     private final SemanticAnalyzer analyzer;
     private String currentClassName;
     private String currentClassInternalName;
+    private ClassNode currentClassNode;
     private final Map<ClosureNode, int[]> closureRegistry = new LinkedHashMap<>();
     private final Map<ClosureNode, String> closureInterfaceNames = new HashMap<>();
     private int closureCounter;
@@ -35,6 +36,7 @@ public class BytecodeGenerator {
                 ? packageName.replace('.', '/') + "/" : "";
             currentClassName = cls.getName();
             currentClassInternalName = packagePrefix + cls.getName();
+            currentClassNode = cls;
             closureRegistry.clear();
             closureCounter = 0;
 
@@ -59,36 +61,159 @@ public class BytecodeGenerator {
     private byte[] generateClass(ProgramNode program, ClassNode cls, String packageName) {
         ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
         int classAccess = getClassAccess(cls.getVisibility());
-        if (cls.isAnnotation()) {
+        if (cls.isEnum()) {
+            classAccess = Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_ENUM | Opcodes.ACC_SUPER;
+        } else if (cls.isAnnotation()) {
             classAccess = Opcodes.ACC_PUBLIC | Opcodes.ACC_INTERFACE | Opcodes.ACC_ABSTRACT | Opcodes.ACC_ANNOTATION;
         }
         String[] interfaces = {};
-        String superClass = cls.isAnnotation() ? "java/lang/Object" : "java/lang/Object";
-        cw.visit(Opcodes.V1_5, classAccess, currentClassInternalName, null, superClass, interfaces);
+        String superClass;
+        if (cls.isEnum()) {
+            superClass = "java/lang/Enum";
+        } else {
+            superClass = cls.isAnnotation() ? "java/lang/Object" : "java/lang/Object";
+        }
+        String signature = cls.isEnum() ? "Ljava/lang/Enum<L" + currentClassInternalName + ";>;" : null;
+        cw.visit(Opcodes.V1_5, classAccess, currentClassInternalName, signature, superClass, interfaces);
 
         // Apply class-level annotations
         for (AnnotationNode ann : cls.getAnnotations()) {
             applyAnnotation(cw, ann);
         }
 
-        for (FieldNode field : cls.getFields()) {
-            if (cls.isAnnotation()) {
-                generateAnnotationMember(cw, field);
-            } else {
-                generateField(cw, field);
+        if (cls.isEnum()) {
+            generateEnumClass(cw, cls);
+        } else {
+            for (FieldNode field : cls.getFields()) {
+                if (cls.isAnnotation()) {
+                    generateAnnotationMember(cw, field);
+                } else {
+                    generateField(cw, field);
+                }
             }
-        }
 
-        if (!cls.isAnnotation()) {
-            generateDefaultConstructor(cw);
-        }
+            if (!cls.isAnnotation()) {
+                generateDefaultConstructor(cw);
+            }
 
-        for (MethodNode method : cls.getMethods()) {
-            generateMethod(cw, method, cls);
+            for (MethodNode method : cls.getMethods()) {
+                generateMethod(cw, method, cls);
+            }
         }
 
         cw.visitEnd();
         return cw.toByteArray();
+    }
+
+    private void generateEnumClass(ClassWriter cw, ClassNode cls) {
+        // Enum constant public static final fields
+        List<String> constants = cls.getEnumConstants();
+        String enumDesc = "L" + currentClassInternalName + ";";
+
+        for (String constant : constants) {
+            cw.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_ENUM,
+                constant, enumDesc, null, null).visitEnd();
+        }
+
+        // Synthetic $VALUES field
+        cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
+            "$VALUES", "[" + enumDesc, null, null).visitEnd();
+
+        // Static initializer <clinit>
+        generateEnumStaticInit(cw, cls);
+
+        // Private constructor (String name, int ordinal)
+        generateEnumConstructor(cw, cls);
+
+        // values() method
+        generateEnumValues(cw, cls);
+
+        // valueOf(String) method
+        generateEnumValueOf(cw, cls);
+
+        // User-defined methods
+        for (MethodNode method : cls.getMethods()) {
+            generateMethod(cw, method, cls);
+        }
+    }
+
+    private void generateEnumStaticInit(ClassWriter cw, ClassNode cls) {
+        List<String> constants = cls.getEnumConstants();
+        String enumDesc = "L" + currentClassInternalName + ";";
+        String enumArrDesc = "[" + enumDesc;
+
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+        mv.visitCode();
+
+        // Create each enum constant
+        for (int i = 0; i < constants.size(); i++) {
+            String name = constants.get(i);
+            mv.visitTypeInsn(Opcodes.NEW, currentClassInternalName);
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitLdcInsn(name);
+            pushInt(mv, i);
+            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, currentClassInternalName, "<init>",
+                "(Ljava/lang/String;I)V", false);
+            mv.visitFieldInsn(Opcodes.PUTSTATIC, currentClassInternalName, name, enumDesc);
+        }
+
+        // Build $VALUES array
+        pushInt(mv, constants.size());
+        mv.visitTypeInsn(Opcodes.ANEWARRAY, currentClassInternalName);
+        for (int i = 0; i < constants.size(); i++) {
+            mv.visitInsn(Opcodes.DUP);
+            pushInt(mv, i);
+            mv.visitFieldInsn(Opcodes.GETSTATIC, currentClassInternalName, constants.get(i), enumDesc);
+            mv.visitInsn(Opcodes.AASTORE);
+        }
+        mv.visitFieldInsn(Opcodes.PUTSTATIC, currentClassInternalName, "$VALUES", enumArrDesc);
+
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(6, 0);
+        mv.visitEnd();
+    }
+
+    private void generateEnumConstructor(ClassWriter cw, ClassNode cls) {
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PRIVATE, "<init>",
+            "(Ljava/lang/String;I)V", null, null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        mv.visitVarInsn(Opcodes.ILOAD, 2);
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Enum", "<init>",
+            "(Ljava/lang/String;I)V", false);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(3, 3);
+        mv.visitEnd();
+    }
+
+    private void generateEnumValues(ClassWriter cw, ClassNode cls) {
+        String enumDesc = "L" + currentClassInternalName + ";";
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "values", "()[" + enumDesc, null, null);
+        mv.visitCode();
+        mv.visitFieldInsn(Opcodes.GETSTATIC, currentClassInternalName, "$VALUES", "[" + enumDesc);
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Object", "clone",
+            "()Ljava/lang/Object;", false);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, "[" + enumDesc);
+        mv.visitInsn(Opcodes.ARETURN);
+        mv.visitMaxs(1, 0);
+        mv.visitEnd();
+    }
+
+    private void generateEnumValueOf(ClassWriter cw, ClassNode cls) {
+        String enumDesc = "L" + currentClassInternalName + ";";
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "valueOf", "(Ljava/lang/String;)" + enumDesc, null, null);
+        mv.visitCode();
+        mv.visitLdcInsn(org.objectweb.asm.Type.getType(enumDesc));
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Enum", "valueOf",
+            "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;", false);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, currentClassInternalName);
+        mv.visitInsn(Opcodes.ARETURN);
+        mv.visitMaxs(2, 1);
+        mv.visitEnd();
     }
 
     private void generateField(ClassWriter cw, FieldNode field) {
@@ -610,6 +735,17 @@ public class BytecodeGenerator {
     // ======================== Variable load ========================
 
     private void generateVariableLoad(MethodVisitor mv, VariableNode vn, SymbolTable symbolTable) {
+        String name = vn.getName();
+        // Qualified name: e.g., Color.RED → GETSTATIC
+        int dotPos = name.indexOf('.');
+        if (dotPos > 0) {
+            String className = name.substring(0, dotPos).replace('.', '/');
+            String fieldName = name.substring(dotPos + 1);
+            String owner = (currentClassInternalName.substring(0,
+                currentClassInternalName.lastIndexOf('/') + 1) + className);
+            mv.visitFieldInsn(Opcodes.GETSTATIC, owner, fieldName, "L" + owner + ";");
+            return;
+        }
         if (vn.getResolvedType() != null && vn.getLocalIndex() >= 0) {
             mv.visitVarInsn(vn.getResolvedType().getLoadOpcode(), vn.getLocalIndex());
         }
@@ -687,6 +823,7 @@ public class BytecodeGenerator {
                 MammothType retType = targetClosure.getReturnType() != null
                     ? MammothType.fromTypeName(targetClosure.getReturnType().getBaseTypeName())
                     : MammothType.VOID;
+                mcn.setReturnType(retType);
                 invokeDesc.append(retType.getDescriptor());
                 mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, ifaceName, "invoke", invokeDesc.toString(), true);
             }
@@ -694,12 +831,111 @@ public class BytecodeGenerator {
         }
 
         // Static method call
-        for (ExpressionNode arg : mcn.getArguments()) {
+        // Look up target method to handle default parameter values
+        MethodNode targetMethod = null;
+        if (currentClassNode != null && !mcn.isBuiltinPrint() && !mcn.isVariableCall()) {
+            for (MethodNode m : currentClassNode.getMethods()) {
+                if (m.getName().equals(methodName)) {
+                    targetMethod = m;
+                    break;
+                }
+            }
+        }
+
+        List<ExpressionNode> effectiveArgs = new ArrayList<>(mcn.getArguments());
+        if (targetMethod != null) {
+            List<String> argNames = mcn.getArgumentNames();
+            boolean hasNamed = false;
+            for (String an : argNames) {
+                if (an != null) { hasNamed = true; break; }
+            }
+
+            if (hasNamed) {
+                // Reorder named arguments to match parameter declaration order
+                int paramCount = targetMethod.getParameters().size();
+                ExpressionNode[] reordered = new ExpressionNode[paramCount];
+                boolean[] filled = new boolean[paramCount];
+
+                for (int i = 0; i < mcn.getArguments().size(); i++) {
+                    String argName = i < argNames.size() ? argNames.get(i) : null;
+                    ExpressionNode arg = mcn.getArguments().get(i);
+                    if (argName != null) {
+                        // Named argument: find parameter by name
+                        String lookupName = argName.startsWith("$") ? argName : "$" + argName;
+                        for (int p = 0; p < paramCount; p++) {
+                            if (targetMethod.getParameters().get(p).getName().equals(lookupName)) {
+                                reordered[p] = arg;
+                                filled[p] = true;
+                                break;
+                            }
+                        }
+                    } else {
+                        // Positional argument: first unfilled slot
+                        for (int p = 0; p < paramCount; p++) {
+                            if (!filled[p]) {
+                                reordered[p] = arg;
+                                filled[p] = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Fill defaults for unfilled slots
+                for (int p = 0; p < paramCount; p++) {
+                    if (!filled[p]) {
+                        ParameterNode param = targetMethod.getParameters().get(p);
+                        if (param.getDefaultValue() != null) {
+                            reordered[p] = param.getDefaultValue();
+                            filled[p] = true;
+                        }
+                    }
+                }
+                effectiveArgs.clear();
+                for (int p = 0; p < paramCount; p++) {
+                    if (filled[p]) {
+                        effectiveArgs.add(reordered[p]);
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                // No named args: just fill in defaults for missing positional args
+                int paramCount = targetMethod.getParameters().size();
+                while (effectiveArgs.size() < paramCount) {
+                    int idx = effectiveArgs.size();
+                    ParameterNode param = targetMethod.getParameters().get(idx);
+                    if (param.getDefaultValue() != null) {
+                        effectiveArgs.add(param.getDefaultValue());
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (int i = 0; i < effectiveArgs.size(); i++) {
+            ExpressionNode arg = effectiveArgs.get(i);
             generateExpression(mv, arg, symbolTable);
+            // Cast argument to match parameter type
+            if (targetMethod != null && i < targetMethod.getParameters().size()) {
+                ParameterNode param = targetMethod.getParameters().get(i);
+                if (param.getType() != null) {
+                    MammothType paramType = MammothType.fromTypeName(param.getType().getBaseTypeName());
+                    MammothType argType = getExprType(arg);
+                    emitCast(mv, argType, paramType);
+                }
+            }
         }
         StringBuilder desc = new StringBuilder("(");
-        for (ExpressionNode arg : mcn.getArguments()) {
-            MammothType type = getExprType(arg);
+        for (int i = 0; i < effectiveArgs.size(); i++) {
+            ExpressionNode arg = effectiveArgs.get(i);
+            MammothType type;
+            if (targetMethod != null && i < targetMethod.getParameters().size()
+                && targetMethod.getParameters().get(i).getType() != null) {
+                type = MammothType.fromTypeName(targetMethod.getParameters().get(i).getType().getBaseTypeName());
+            } else {
+                type = getExprType(arg);
+            }
             desc.append(type != null ? type.getDescriptor() : "Ljava/lang/Object;");
         }
         desc.append(")V");
@@ -775,6 +1011,32 @@ public class BytecodeGenerator {
         }
 
         generateExpression(mv, bon.getLeft(), symbolTable);
+        // String concatenation: check before numeric casts
+        if (leftType == MammothType.STRING && op.equals("+")) {
+            generateExpression(mv, bon.getRight(), symbolTable);
+            if (rightType != null && rightType != MammothType.STRING && rightType != MammothType.NULL
+                && rightType != MammothType.VOID) {
+                String desc = rightType.getDescriptor();
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/String", "valueOf",
+                    "(" + desc + ")Ljava/lang/String;", false);
+            }
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "concat",
+                "(Ljava/lang/String;)Ljava/lang/String;", false);
+            return;
+        }
+        // Right side is string (e.g., $age + " years")
+        if (rightType == MammothType.STRING && op.equals("+")) {
+            if (leftType != null && leftType != MammothType.STRING && leftType != MammothType.NULL
+                && leftType != MammothType.VOID) {
+                String desc = leftType.getDescriptor();
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/String", "valueOf",
+                    "(" + desc + ")Ljava/lang/String;", false);
+            }
+            generateExpression(mv, bon.getRight(), symbolTable);
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "concat",
+                "(Ljava/lang/String;)Ljava/lang/String;", false);
+            return;
+        }
         // Cast left if needed for matching right type
         if (rightType == MammothType.INT64 && leftType != MammothType.INT64) mv.visitInsn(Opcodes.I2L);
         if (rightType == MammothType.FLOAT64 && leftType != MammothType.FLOAT64) mv.visitInsn(Opcodes.I2D);
@@ -782,12 +1044,6 @@ public class BytecodeGenerator {
         // Cast right if needed for matching left type
         if (leftType == MammothType.INT64 && rightType != MammothType.INT64) mv.visitInsn(Opcodes.I2L);
         if (leftType == MammothType.FLOAT64 && rightType != MammothType.FLOAT64) mv.visitInsn(Opcodes.I2D);
-
-        if (leftType == MammothType.STRING && op.equals("+")) {
-            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "concat",
-                "(Ljava/lang/String;)Ljava/lang/String;", false);
-            return;
-        }
 
         int opcode = switch (leftType) {
             case INT64 -> switch (op) {
@@ -898,9 +1154,14 @@ public class BytecodeGenerator {
             }
         }
         methodDesc.append(")");
-        MammothType retType = closure.getReturnType() != null
-            ? MammothType.fromTypeName(closure.getReturnType().getBaseTypeName())
-            : MammothType.VOID;
+        MammothType retType;
+        if (closure.getReturnType() != null) {
+            retType = MammothType.fromTypeName(closure.getReturnType().getBaseTypeName());
+        } else if (closure.isArrowFunction()) {
+            retType = inferClosureReturnType(closure);
+        } else {
+            retType = MammothType.VOID;
+        }
         methodDesc.append(retType.getDescriptor());
 
         cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_ABSTRACT,
@@ -996,9 +1257,14 @@ public class BytecodeGenerator {
             }
         }
         methodDesc.append(")");
-        MammothType retType = closure.getReturnType() != null
-            ? MammothType.fromTypeName(closure.getReturnType().getBaseTypeName())
-            : MammothType.VOID;
+        MammothType retType;
+        if (closure.getReturnType() != null) {
+            retType = MammothType.fromTypeName(closure.getReturnType().getBaseTypeName());
+        } else if (closure.isArrowFunction()) {
+            retType = inferClosureReturnType(closure);
+        } else {
+            retType = MammothType.VOID;
+        }
         methodDesc.append(retType.getDescriptor());
 
         MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "invoke", methodDesc.toString(), null, null);
@@ -1057,6 +1323,16 @@ public class BytecodeGenerator {
             generateLiteral(mv, ln);
         } else if (expr instanceof VariableNode vn) {
             String name = vn.getName();
+            // Qualified name (e.g., Color.RED)
+            int dotPosQ = name.indexOf('.');
+            if (dotPosQ > 0) {
+                String clName = name.substring(0, dotPosQ).replace('.', '/');
+                String fName = name.substring(dotPosQ + 1);
+                String ownerQ = (currentClassInternalName.substring(0,
+                    currentClassInternalName.lastIndexOf('/') + 1) + clName);
+                mv.visitFieldInsn(Opcodes.GETSTATIC, ownerQ, fName, "L" + ownerQ + ";");
+                return;
+            }
             // Check if closure parameter
             int paramSlot = 1; // slot 0 is 'this' in instance methods
             for (int i = 0; i < closure.getParameters().size(); i++) {
@@ -1165,6 +1441,7 @@ public class BytecodeGenerator {
             return MammothType.inferFromLiteral(ln.getTypeHint());
         }
         if (expr instanceof VariableNode vn) {
+            if (vn.getName().contains(".")) return MammothType.NULL;
             TypeNode inferred = vn.getInferredType();
             if (inferred != null) return MammothType.fromTypeName(inferred.getBaseTypeName());
             return MammothType.STRING;
@@ -1185,6 +1462,10 @@ public class BytecodeGenerator {
         }
         if (expr instanceof MethodCallNode mcn) {
             if (mcn.isBuiltinPrint()) return MammothType.VOID;
+            if (mcn.isVariableCall()) {
+                if (mcn.getReturnType() != null) return mcn.getReturnType();
+                return MammothType.STRING;
+            }
             return MammothType.VOID;
         }
         if (expr instanceof ClosureNode) {
@@ -1244,5 +1525,27 @@ public class BytecodeGenerator {
     private String stripDollar(String name) {
         if (name.startsWith("$")) return name.substring(1);
         return name;
+    }
+
+    private MammothType inferClosureReturnType(ClosureNode closure) {
+        if (closure.getBody() != null) {
+            for (StatementNode stmt : closure.getBody().getStatements()) {
+                if (stmt instanceof ReturnNode rn && rn.hasValue()) {
+                    ExpressionNode val = rn.getValue();
+                    if (val instanceof LiteralNode ln) {
+                        return MammothType.inferFromLiteral(ln.getTypeHint());
+                    }
+                    if (val instanceof VariableNode vn) {
+                        // Check if it's a captured variable
+                        for (CaptureItem cap : closure.getCaptures()) {
+                            if (cap.getVariableName().equals(vn.getName()) && cap.getResolvedType() instanceof MammothType mt) {
+                                return mt;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return MammothType.STRING; // default to Object reference
     }
 }

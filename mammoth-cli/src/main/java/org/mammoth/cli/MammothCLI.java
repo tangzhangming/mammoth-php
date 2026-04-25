@@ -66,19 +66,23 @@ public class MammothCLI {
         }
 
         MammothCompiler compiler = new MammothCompiler();
-        byte[] classBytes = compiler.compile(sourceFile);
+        Map<String, byte[]> allClasses = compiler.compileAll(sourceFile);
 
         if (outputJar != null) {
-            // Package as JAR
             String className = deriveClassName(sourceFile);
-            createJar(outputJar, className, classBytes, includeRuntime);
+            byte[] mainClass = allClasses.get(className + ".class");
+            if (mainClass == null && !allClasses.isEmpty()) {
+                mainClass = allClasses.values().iterator().next();
+                String key = allClasses.keySet().iterator().next();
+                className = key.substring(0, key.length() - 6);
+            }
+            createJar(outputJar, className, mainClass, includeRuntime, allClasses);
             System.out.println("Created: " + outputJar);
         } else {
-            // Output .class file
-            String className = deriveClassName(sourceFile);
-            String outputPath = className + ".class";
-            Files.write(Path.of(outputPath), classBytes);
-            System.out.println("Compiled: " + sourceFile + " -> " + outputPath);
+            for (Map.Entry<String, byte[]> entry : allClasses.entrySet()) {
+                Files.write(Path.of(entry.getKey()), entry.getValue());
+                System.out.println("Compiled: " + sourceFile + " -> " + entry.getKey());
+            }
         }
     }
 
@@ -95,11 +99,14 @@ public class MammothCLI {
         if (targetFile.endsWith(".php") || targetFile.endsWith(".mp")) {
             // Compile and run
             MammothCompiler compiler = new MammothCompiler();
-            byte[] classBytes = compiler.compile(targetFile);
+            Map<String, byte[]> allClasses = compiler.compileAll(targetFile);
             String className = deriveClassName(targetFile);
             Path tempDir = Files.createTempDirectory("mammoth-run-");
-            Path classFile = tempDir.resolve(className + ".class");
-            Files.write(classFile, classBytes);
+
+            // Write all generated classes to temp dir
+            for (Map.Entry<String, byte[]> entry : allClasses.entrySet()) {
+                Files.write(tempDir.resolve(entry.getKey()), entry.getValue());
+            }
 
             // Run with java
             List<String> cmd = new ArrayList<>();
@@ -111,7 +118,9 @@ public class MammothCLI {
             execute(cmd);
 
             // Cleanup
-            Files.deleteIfExists(classFile);
+            for (Map.Entry<String, byte[]> entry : allClasses.entrySet()) {
+                Files.deleteIfExists(tempDir.resolve(entry.getKey()));
+            }
             Files.deleteIfExists(tempDir);
 
         } else if (targetFile.endsWith(".class")) {
@@ -154,17 +163,17 @@ public class MammothCLI {
     }
 
     private static void createJar(String outputPath, String className, byte[] classBytes,
-                                   boolean includeRuntime) throws IOException {
+                                   boolean includeRuntime, Map<String, byte[]> allClasses) throws IOException {
         Manifest manifest = new Manifest();
         manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
         manifest.getMainAttributes().putValue("Main-Class", className);
 
         try (JarOutputStream jos = new JarOutputStream(new FileOutputStream(outputPath), manifest)) {
-            // Add class file
-            String entryName = className + ".class";
-            jos.putNextEntry(new JarEntry(entryName));
-            jos.write(classBytes);
-            jos.closeEntry();
+            for (Map.Entry<String, byte[]> entry : allClasses.entrySet()) {
+                jos.putNextEntry(new JarEntry(entry.getKey()));
+                jos.write(entry.getValue());
+                jos.closeEntry();
+            }
         }
     }
 

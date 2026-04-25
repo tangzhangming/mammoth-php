@@ -8,7 +8,9 @@ public class ClassNode extends MammothNode {
     private final java.util.List<MethodNode> methods = new java.util.ArrayList<>();
     private final java.util.List<FieldNode> fields = new java.util.ArrayList<>();
     private final java.util.List<AnnotationNode> annotations = new java.util.ArrayList<>();
+    private final java.util.List<String> enumConstants = new java.util.ArrayList<>();
     private boolean isAnnotation;
+    private boolean isEnum;
 
     public ClassNode(Token token, String name) {
         super(token);
@@ -28,4 +30,8 @@ public class ClassNode extends MammothNode {
     public void addAnnotation(AnnotationNode ann) { annotations.add(ann); }
     public boolean isAnnotation() { return isAnnotation; }
     public void setAnnotation(boolean annotation) { isAnnotation = annotation; }
+    public boolean isEnum() { return isEnum; }
+    public void setEnum(boolean isEnum) { this.isEnum = isEnum; }
+    public java.util.List<String> getEnumConstants() { return enumConstants; }
+    public void addEnumConstant(String constant) { enumConstants.add(constant); }
 }

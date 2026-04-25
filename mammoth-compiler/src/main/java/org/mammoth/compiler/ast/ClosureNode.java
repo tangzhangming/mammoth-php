@@ -9,6 +9,7 @@ public class ClosureNode extends MammothNode implements ExpressionNode {
     private final List<CaptureItem> captures = new ArrayList<>();
     private TypeNode returnType;
     private BlockNode body;
+    private boolean isArrowFunction;
 
     public ClosureNode(Token token) {
         super(token);
@@ -29,4 +30,7 @@ public class ClosureNode extends MammothNode implements ExpressionNode {
     public boolean hasReferences() {
         return captures.stream().anyMatch(CaptureItem::isByReference);
     }
+
+    public boolean isArrowFunction() { return isArrowFunction; }
+    public void setArrowFunction(boolean isArrowFunction) { this.isArrowFunction = isArrowFunction; }
 }

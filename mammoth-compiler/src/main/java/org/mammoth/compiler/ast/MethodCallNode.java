@@ -8,10 +8,12 @@ import java.util.List;
 public class MethodCallNode extends MammothNode implements ExpressionNode {
     private final String methodName;
     private final List<ExpressionNode> arguments = new ArrayList<>();
+    private final List<String> argumentNames = new ArrayList<>(); // null for positional
     private boolean isBuiltinPrint;
     private boolean isVariableCall;
     private MammothType targetType;
     private int targetLocalIndex = -1;
+    private MammothType returnType;
 
     public MethodCallNode(Token token, String methodName) {
         super(token);
@@ -21,7 +23,9 @@ public class MethodCallNode extends MammothNode implements ExpressionNode {
 
     public String getMethodName() { return methodName; }
     public List<ExpressionNode> getArguments() { return arguments; }
-    public void addArgument(ExpressionNode arg) { arguments.add(arg); }
+    public void addArgument(ExpressionNode arg) { arguments.add(arg); argumentNames.add(null); }
+    public void addNamedArgument(String name, ExpressionNode arg) { arguments.add(arg); argumentNames.add(name); }
+    public List<String> getArgumentNames() { return argumentNames; }
     public boolean isBuiltinPrint() { return isBuiltinPrint; }
     public void setBuiltinPrint(boolean isBuiltinPrint) { this.isBuiltinPrint = isBuiltinPrint; }
     public boolean isVariableCall() { return isVariableCall; }
@@ -29,4 +33,6 @@ public class MethodCallNode extends MammothNode implements ExpressionNode {
     public void setTargetType(MammothType targetType) { this.targetType = targetType; }
     public int getTargetLocalIndex() { return targetLocalIndex; }
     public void setTargetLocalIndex(int targetLocalIndex) { this.targetLocalIndex = targetLocalIndex; }
+    public MammothType getReturnType() { return returnType; }
+    public void setReturnType(MammothType returnType) { this.returnType = returnType; }
 }
