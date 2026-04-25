@@ -1,0 +1,5 @@
+#!/bin/bash
+MAMMOTH_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+JAVA_CMD="${JAVA_HOME:-/usr/bin}/java"
+MAMMOTH_CP="$MAMMOTH_HOME/lib/*"
+exec "$JAVA_CMD" -cp "$MAMMOTH_CP" -Dmammoth.prog=mammothc org.mammoth.cli.MammothCLI mammothc "$@"
