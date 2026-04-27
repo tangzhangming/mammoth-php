@@ -21,8 +21,10 @@ importDeclaration
     ;
 
 classDeclaration
-    : annotationUsage* visibility? ANNOTATION CLASS identifier annotationBody
-    | annotationUsage* visibility? CLASS identifier LBRACE classMember* RBRACE
+    : annotationUsage* visibility? FINAL? CLASS identifier (EXTENDS identifier)? (IMPLEMENTS identifier (COMMA identifier)*)? LBRACE classMember* RBRACE
+    | annotationUsage* visibility? ABSTRACT CLASS identifier (EXTENDS identifier)? (IMPLEMENTS identifier (COMMA identifier)*)? LBRACE classMember* RBRACE
+    | annotationUsage* visibility? INTERFACE identifier (EXTENDS identifier (COMMA identifier)*)? LBRACE interfaceMember* RBRACE
+    | annotationUsage* visibility? ANNOTATION CLASS identifier annotationBody
     | annotationUsage* visibility? ENUM identifier LBRACE enumConstantList RBRACE
     ;
 
@@ -44,7 +46,7 @@ classMember
     ;
 
 fieldDeclaration
-    : annotationUsage* visibility? type? variableDeclarator SEMICOLON
+    : annotationUsage* visibility? STATIC? type? variableDeclarator SEMICOLON
     ;
 
 variableDeclarator
@@ -52,7 +54,12 @@ variableDeclarator
     ;
 
 methodDeclaration
-    : annotationUsage* visibility? STATIC? FUNCTION identifier LPAREN parameters? RPAREN returnType? block
+    : annotationUsage* visibility? STATIC? FUNCTION identifier LPAREN parameters? RPAREN returnType? (block | SEMICOLON)
+    ;
+
+interfaceMember
+    : annotationUsage* visibility? STATIC? FUNCTION identifier LPAREN parameters? RPAREN returnType? (block | SEMICOLON)
+    | annotationUsage* visibility? type? VARIABLE (ASSIGN expression)? SEMICOLON
     ;
 
 returnType
@@ -64,12 +71,13 @@ parameters
     ;
 
 parameter
-    : annotationUsage* type? VARIABLE (ASSIGN expression)?
+    : annotationUsage* visibility? type? VARIABLE (ASSIGN expression)?
     ;
 
 type
     : nullableType
     | primitiveType
+    | qualifiedName
     ;
 
 nullableType
@@ -201,6 +209,9 @@ expression
     : primary                                                      #primaryExpr
     | LPAREN type RPAREN expression                                #castExpr
     | (MINUS | NOT) expression                                     #unaryExpr
+    | expression THIN_ARROW IDENTIFIER ASSIGN expression           #memberAssignExpr
+    | (SELF | IDENTIFIER) DOUBLE_COLON VARIABLE ASSIGN expression  #staticAssignExpr
+    | expression THIN_ARROW IDENTIFIER (LPAREN arguments? RPAREN)? #memberAccessExpr
     | expression op=(MULTIPLY | DIVIDE | MODULO) expression        #multiplicativeExpr
     | expression op=(PLUS | MINUS) expression                      #additiveExpr
     | expression op=(LT | GT | LTE | GTE) expression               #comparisonExpr
@@ -215,6 +226,7 @@ primary
     | closureExpression
     | arrowExpression
     | newExpression
+    | staticAccess
     | callExpression
     | VARIABLE
     | qualifiedName
@@ -240,6 +252,10 @@ closureExpression
 
 arrowExpression
     : FN LPAREN parameters? RPAREN ARROW expression
+    ;
+
+staticAccess
+    : (SELF | PARENT | IDENTIFIER) DOUBLE_COLON (VARIABLE | IDENTIFIER) (LPAREN arguments? RPAREN)?
     ;
 
 captureClause
@@ -300,6 +316,13 @@ IMPORT      : 'import';
 USE         : 'use';
 CLASS       : 'class';
 ENUM        : 'enum';
+ABSTRACT    : 'abstract';
+INTERFACE   : 'interface';
+IMPLEMENTS  : 'implements';
+EXTENDS     : 'extends';
+FINAL       : 'final';
+SELF        : 'self';
+PARENT      : 'parent';
 PUBLIC      : 'public';
 PROTECTED   : 'protected';
 PRIVATE     : 'private';
@@ -380,6 +403,7 @@ LBRACE      : '{';
 RBRACE      : '}';
 SEMICOLON   : ';';
 COLON       : ':';
+DOUBLE_COLON: '::';
 COMMA       : ',';
 DOT         : '.';
 QUESTION    : '?';
@@ -394,6 +418,7 @@ AND         : '&&';
 OR          : '||';
 NOT         : '!';
 ARROW       : '=>';
+THIN_ARROW  : '->';
 
 // Comments
 LINE_COMMENT    : '//' ~[\r\n]* -> skip;

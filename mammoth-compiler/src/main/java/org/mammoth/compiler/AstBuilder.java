@@ -39,7 +39,7 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
 
     @Override
     public ClassNode visitClassDeclaration(MammothParser.ClassDeclarationContext ctx) {
-        String name = ctx.identifier().getText();
+        String name = ctx.identifier(0).getText();
         ClassNode classNode = new ClassNode(ctx.start, name);
 
         for (MammothParser.AnnotationUsageContext annCtx : ctx.annotationUsage()) {
@@ -47,19 +47,28 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         }
         if (ctx.visibility() != null) classNode.setVisibility(ctx.visibility().getText());
 
-        // Check if annotation class (first alternative)
         classNode.setAnnotation(ctx.ANNOTATION() != null);
-
-        // Check if enum class
         classNode.setEnum(ctx.ENUM() != null);
+        classNode.setAbstract(ctx.ABSTRACT() != null);
+        classNode.setInterface(ctx.INTERFACE() != null);
+        classNode.setFinal(ctx.FINAL() != null);
+
+        if (ctx.EXTENDS() != null) {
+            classNode.setParentClassName(ctx.identifier(1).getText());
+        }
+        if (ctx.IMPLEMENTS() != null) {
+            int startIdx = ctx.EXTENDS() != null ? 2 : 1;
+            int count = ctx.identifier().size();
+            for (int i = startIdx; i < count; i++) {
+                classNode.addInterface(ctx.identifier(i).getText());
+            }
+        }
 
         if (classNode.isEnum()) {
-            // Enum class
             MammothParser.EnumConstantListContext ecl = ctx.enumConstantList();
             for (org.antlr.v4.runtime.tree.TerminalNode id : ecl.IDENTIFIER()) {
                 classNode.addEnumConstant(id.getText());
             }
-            // Handle class members in enum (methods etc.)
             for (MammothParser.ClassMemberContext member : ecl.classMember()) {
                 if (member.fieldDeclaration() != null) {
                     classNode.addField(visitFieldDeclaration(member.fieldDeclaration()));
@@ -68,7 +77,6 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
                 }
             }
         } else if (classNode.isAnnotation()) {
-            // Annotation class: members come from annotationBody
             if (ctx.annotationBody() != null) {
                 for (MammothParser.AnnotationMemberContext am : ctx.annotationBody().annotationMember()) {
                     String memberName = am.VARIABLE().getText();
@@ -79,8 +87,23 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
                     classNode.addField(field);
                 }
             }
+        } else if (classNode.isInterface()) {
+            if (ctx.interfaceMember() != null) {
+                for (MammothParser.InterfaceMemberContext im : ctx.interfaceMember()) {
+                    if (im.VARIABLE() != null) {
+                        String constName = im.VARIABLE().getText();
+                        FieldNode field = new FieldNode(im.start, constName);
+                        field.setVisibility("public");
+                        field.setStatic(true);
+                        if (im.type() != null) field.setType(visitType(im.type()));
+                        if (im.expression() != null) field.setInitializer(parseExpression(im.expression()));
+                        classNode.addField(field);
+                    } else if (im.FUNCTION() != null) {
+                        classNode.addMethod(visitInterfaceMethod(im));
+                    }
+                }
+            }
         } else {
-            // Regular class: members from classMember*
             for (MammothParser.ClassMemberContext member : ctx.classMember()) {
                 if (member.fieldDeclaration() != null) {
                     classNode.addField(visitFieldDeclaration(member.fieldDeclaration()));
@@ -90,6 +113,29 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
             }
         }
         return classNode;
+    }
+
+    private MethodNode visitInterfaceMethod(MammothParser.InterfaceMemberContext ctx) {
+        String name = ctx.identifier().getText();
+        MethodNode method = new MethodNode(ctx.start, name);
+        if (ctx.visibility() != null) method.setVisibility(ctx.visibility().getText());
+        method.setStatic(ctx.STATIC() != null);
+        if (ctx.parameters() != null) {
+            for (MammothParser.ParameterContext p : ctx.parameters().parameter()) {
+                method.addParameter(visitParameter(p));
+            }
+        }
+        if (ctx.returnType() != null && ctx.returnType().type() != null) {
+            method.setReturnType(visitType(ctx.returnType().type()));
+        } else {
+            method.setReturnType(new TypeNode("void", false));
+        }
+        if (ctx.block() != null) {
+            method.setBody(visitBlock(ctx.block()));
+        } else {
+            method.setAbstract(true);  // no body → abstract
+        }
+        return method;
     }
 
     @Override
@@ -102,6 +148,7 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
             field.addAnnotation(visitAnnotationUsage(annCtx));
         }
         if (ctx.visibility() != null) field.setVisibility(ctx.visibility().getText());
+        field.setStatic(ctx.STATIC() != null);
         if (ctx.type() != null) field.setType(visitType(ctx.type()));
         if (decl.expression() != null) field.setInitializer(parseExpression(decl.expression()));
         return field;
@@ -126,7 +173,11 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         } else {
             method.setReturnType(new TypeNode("void", false));
         }
-        method.setBody(visitBlock(ctx.block()));
+        if (ctx.block() != null) {
+            method.setBody(visitBlock(ctx.block()));
+        } else {
+            method.setAbstract(true);
+        }
         return method;
     }
 
@@ -137,6 +188,7 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         for (MammothParser.AnnotationUsageContext annCtx : ctx.annotationUsage()) {
             param.addAnnotation(visitAnnotationUsage(annCtx));
         }
+        if (ctx.visibility() != null) param.setVisibility(ctx.visibility().getText());
         if (ctx.type() != null) param.setType(visitType(ctx.type()));
         if (ctx.expression() != null) param.setDefaultValue(parseExpression(ctx.expression()));
         return param;
@@ -150,6 +202,8 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         } else if (ctx.primitiveType() != null) {
             String baseName = ctx.primitiveType().typeName.getText();
             return new TypeNode(baseName, false);
+        } else if (ctx.qualifiedName() != null) {
+            return new TypeNode(ctx.qualifiedName().getText(), false);
         }
         return new TypeNode("void", false);
     }
@@ -186,7 +240,7 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         return localVar;
     }
 
-    // ---- Control flow visitors ----
+    // ---- Control flow ----
 
     @Override
     public IfNode visitIfStatement(MammothParser.IfStatementContext ctx) {
@@ -249,7 +303,7 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         return new ContinueNode(ctx.start);
     }
 
-    // ---- Label methods for expression rule ----
+    // ---- Expression label methods ----
 
     @Override
     public ExpressionNode visitPrimaryExpr(MammothParser.PrimaryExprContext ctx) {
@@ -272,6 +326,39 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         } else {
             return new BinaryOpNode(ctx.start, expr, "!", null);
         }
+    }
+
+    // ---- Member access ----
+
+    @Override
+    public ExpressionNode visitMemberAccessExpr(MammothParser.MemberAccessExprContext ctx) {
+        ExpressionNode target = parseExpression(ctx.expression());
+        String memberName = ctx.IDENTIFIER().getText();
+        List<ExpressionNode> args = null;
+        if (ctx.arguments() != null) {
+            args = new ArrayList<>();
+            for (MammothParser.ArgumentContext argCtx : ctx.arguments().argument()) {
+                if (argCtx instanceof MammothParser.NamedArgumentContext nac) {
+                    args.add(parseExpression(nac.expression()));
+                } else if (argCtx instanceof MammothParser.PositionalArgumentContext pac) {
+                    args.add(parseExpression(pac.expression()));
+                }
+            }
+        }
+        return new MemberAccessNode(ctx.start, target, memberName, args);
+    }
+
+    @Override
+    public ExpressionNode visitMemberAssignExpr(MammothParser.MemberAssignExprContext ctx) {
+        List<MammothParser.ExpressionContext> exprs = ctx.expression();
+        ExpressionNode target = parseExpression(exprs.get(0));
+        String memberName = ctx.IDENTIFIER().getText();
+        ExpressionNode value = parseExpression(exprs.get(exprs.size() - 1));
+        // Build as AssignmentNode where target is a MemberAccessNode (for the field)
+        MemberAccessNode fieldTarget = new MemberAccessNode(ctx.start, target, memberName, null);
+        fieldTarget.setMethodCall(false);
+        return new AssignmentNode(ctx.start,
+            new VariableNode(ctx.IDENTIFIER().getSymbol(), memberName), value);
     }
 
     @Override
@@ -320,7 +407,53 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
             parseExpression(ctx.expression(0)), "||", parseExpression(ctx.expression(1)));
     }
 
-    // ---- Helper for expression dispatching ----
+    // ---- Static assignment (self::$var = expr) ----
+
+    @Override
+    public ExpressionNode visitStaticAssignExpr(MammothParser.StaticAssignExprContext ctx) {
+        String className = ctx.SELF() != null ? "self" : ctx.IDENTIFIER().getText();
+        String varName = ctx.VARIABLE().getText();
+        ExpressionNode value = parseExpression(ctx.expression());
+        VariableNode target = new VariableNode(ctx.VARIABLE().getSymbol(), varName);
+        AssignmentNode an = new AssignmentNode(ctx.start, target, value);
+        an.setStaticAssign(className);
+        return an;
+    }
+
+    // ---- Static access (in primary) ----
+
+    @Override
+    public ExpressionNode visitStaticAccess(MammothParser.StaticAccessContext ctx) {
+        String className;
+        if (ctx.SELF() != null) className = "self";
+        else if (ctx.PARENT() != null) className = "parent";
+        else className = ctx.IDENTIFIER(0).getText();
+
+        String memberName;
+        if (ctx.VARIABLE() != null) memberName = ctx.VARIABLE().getText();
+        else if (ctx.IDENTIFIER().size() > 0) {
+            // second IDENTIFIER (first was class name for ClassName::member)
+            int idIdx = (ctx.SELF() != null || ctx.PARENT() != null) ? 0 : 1;
+            memberName = ctx.IDENTIFIER(idIdx).getText();
+        } else {
+            memberName = "";
+        }
+
+        List<ExpressionNode> args = null;
+        if (ctx.arguments() != null) {
+            args = new ArrayList<>();
+            for (MammothParser.ArgumentContext argCtx : ctx.arguments().argument()) {
+                if (argCtx instanceof MammothParser.NamedArgumentContext nac) {
+                    args.add(parseExpression(nac.expression()));
+                } else if (argCtx instanceof MammothParser.PositionalArgumentContext pac) {
+                    args.add(parseExpression(pac.expression()));
+                }
+            }
+        }
+        return new StaticAccessNode(ctx.start, className, memberName, args);
+    }
+
+    // ---- Helpers ----
 
     @SuppressWarnings("unchecked")
     private ExpressionNode parseExpression(MammothParser.ExpressionContext ctx) {
@@ -329,50 +462,28 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
 
     @Override
     public ExpressionNode visitPrimary(MammothParser.PrimaryContext ctx) {
-        if (ctx.literal() != null) {
-            return visitLiteral(ctx.literal());
-        }
-        if (ctx.closureExpression() != null) {
-            return visitClosureExpression(ctx.closureExpression());
-        }
-        if (ctx.arrowExpression() != null) {
-            return visitArrowExpression(ctx.arrowExpression());
-        }
-        if (ctx.newExpression() != null) {
-            return visitNewExpression(ctx.newExpression());
-        }
-        if (ctx.callExpression() != null) {
-            return visitCallExpression(ctx.callExpression());
-        }
-        if (ctx.VARIABLE() != null) {
-            return new VariableNode(ctx.VARIABLE().getSymbol(), ctx.VARIABLE().getText());
-        }
-        if (ctx.qualifiedName() != null) {
-            return new VariableNode(ctx.qualifiedName().start, ctx.qualifiedName().getText());
-        }
-        if (ctx.IDENTIFIER() != null) {
-            return new VariableNode(ctx.IDENTIFIER().getSymbol(), ctx.IDENTIFIER().getText());
-        }
-        if (ctx.expression() != null) {
-            return parseExpression(ctx.expression());
-        }
+        if (ctx.literal() != null) return visitLiteral(ctx.literal());
+        if (ctx.closureExpression() != null) return visitClosureExpression(ctx.closureExpression());
+        if (ctx.arrowExpression() != null) return visitArrowExpression(ctx.arrowExpression());
+        if (ctx.newExpression() != null) return visitNewExpression(ctx.newExpression());
+        if (ctx.staticAccess() != null) return visitStaticAccess(ctx.staticAccess());
+        if (ctx.callExpression() != null) return visitCallExpression(ctx.callExpression());
+        if (ctx.VARIABLE() != null) return new VariableNode(ctx.VARIABLE().getSymbol(), ctx.VARIABLE().getText());
+        if (ctx.qualifiedName() != null) return new VariableNode(ctx.qualifiedName().start, ctx.qualifiedName().getText());
+        if (ctx.IDENTIFIER() != null) return new VariableNode(ctx.IDENTIFIER().getSymbol(), ctx.IDENTIFIER().getText());
+        if (ctx.expression() != null) return parseExpression(ctx.expression());
         throw new RuntimeException("Unknown primary expression");
     }
 
     @Override
     public MethodCallNode visitCallExpression(MammothParser.CallExpressionContext ctx) {
         String name;
-        if (ctx.identifier() != null) {
-            name = ctx.identifier().getText();
-        } else if (ctx.builtinPrint() != null) {
-            name = ctx.builtinPrint().getText();
-        } else {
-            name = ctx.VARIABLE().getText();
-        }
+        if (ctx.identifier() != null) name = ctx.identifier().getText();
+        else if (ctx.builtinPrint() != null) name = ctx.builtinPrint().getText();
+        else name = ctx.VARIABLE().getText();
+
         MethodCallNode call = new MethodCallNode(ctx.start, name);
-        if (ctx.builtinPrint() != null) {
-            call.setBuiltinPrint(true);
-        }
+        if (ctx.builtinPrint() != null) call.setBuiltinPrint(true);
         if (ctx.arguments() != null) {
             for (MammothParser.ArgumentContext argCtx : ctx.arguments().argument()) {
                 if (argCtx instanceof MammothParser.NamedArgumentContext nac) {
@@ -390,27 +501,17 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         if (ctx.STRING_LITERAL() != null) {
             String text = ctx.STRING_LITERAL().getText();
             String value = text.substring(1, text.length() - 1);
-
-            // String interpolation: "Hello $name, age: $age"
-            if (value.contains("$")) {
-                return buildInterpolatedString(ctx.start, value);
-            }
-
+            if (value.contains("$")) return buildInterpolatedString(ctx.start, value);
             return new LiteralNode(ctx.start, value, "string");
         }
         if (ctx.INTEGER_LITERAL() != null) {
             String text = ctx.INTEGER_LITERAL().getText();
             long value;
-            if (text.startsWith("0x") || text.startsWith("0X")) {
-                value = Long.parseLong(text.substring(2), 16);
-            } else if (text.startsWith("0b") || text.startsWith("0B")) {
-                value = Long.parseLong(text.substring(2), 2);
-            } else {
-                value = Long.parseLong(text);
-            }
-            if (value >= Integer.MIN_VALUE && value <= Integer.MAX_VALUE) {
+            if (text.startsWith("0x") || text.startsWith("0X")) value = Long.parseLong(text.substring(2), 16);
+            else if (text.startsWith("0b") || text.startsWith("0B")) value = Long.parseLong(text.substring(2), 2);
+            else value = Long.parseLong(text);
+            if (value >= Integer.MIN_VALUE && value <= Integer.MAX_VALUE)
                 return new LiteralNode(ctx.start, (int) value, "int");
-            }
             return new LiteralNode(ctx.start, value, "int");
         }
         if (ctx.FLOAT_LITERAL() != null) {
@@ -421,9 +522,7 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
             boolean value = Boolean.parseBoolean(ctx.BOOLEAN_LITERAL().getText());
             return new LiteralNode(ctx.start, value, "boolean");
         }
-        if (ctx.NULL() != null) {
-            return new LiteralNode(ctx.start, null, "null");
-        }
+        if (ctx.NULL() != null) return new LiteralNode(ctx.start, null, "null");
         throw new RuntimeException("Unknown literal");
     }
 
@@ -431,34 +530,26 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
     public ClosureNode visitArrowExpression(MammothParser.ArrowExpressionContext ctx) {
         ClosureNode closure = new ClosureNode(ctx.start);
         closure.setArrowFunction(true);
-
         if (ctx.parameters() != null) {
             for (MammothParser.ParameterContext p : ctx.parameters().parameter()) {
                 closure.addParameter(visitParameter(p));
             }
         }
-
-        // Wrap expression body in a block with return
         BlockNode body = new BlockNode();
         body.addStatement(new ReturnNode(ctx.start, parseExpression(ctx.expression())));
         closure.setBody(body);
-
-        // Return type: let bytecode generator infer from expression body
         closure.setReturnType(null);
-
         return closure;
     }
 
     @Override
     public ClosureNode visitClosureExpression(MammothParser.ClosureExpressionContext ctx) {
         ClosureNode closure = new ClosureNode(ctx.start);
-
         if (ctx.parameters() != null) {
             for (MammothParser.ParameterContext p : ctx.parameters().parameter()) {
                 closure.addParameter(visitParameter(p));
             }
         }
-
         if (ctx.captureClause() != null) {
             for (MammothParser.CaptureItemContext ci : ctx.captureClause().captureList().captureItem()) {
                 String varName = ci.VARIABLE().getText();
@@ -466,13 +557,11 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
                 closure.addCapture(new CaptureItem(varName, byRef));
             }
         }
-
         if (ctx.returnType() != null && ctx.returnType().type() != null) {
             closure.setReturnType(visitType(ctx.returnType().type()));
         } else {
             closure.setReturnType(new TypeNode("void", false));
         }
-
         closure.setBody(visitBlock(ctx.block()));
         return closure;
     }
@@ -484,7 +573,6 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         if (ctx.arguments() != null) {
             for (MammothParser.ArgumentContext argCtx : ctx.arguments().argument()) {
                 if (argCtx instanceof MammothParser.NamedArgumentContext nac) {
-                    // Named args not supported for new expressions, treat as positional
                     node.addArgument(parseExpression(nac.expression()));
                 } else if (argCtx instanceof MammothParser.PositionalArgumentContext pac) {
                     node.addArgument(parseExpression(pac.expression()));
@@ -502,19 +590,12 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
         int lastEnd = 0;
         while (m.find()) {
             String before = s.substring(lastEnd, m.start());
-            if (!before.isEmpty()) {
-                parts.add(new LiteralNode(token, before, "string"));
-            }
+            if (!before.isEmpty()) parts.add(new LiteralNode(token, before, "string"));
             parts.add(new VariableNode(token, m.group()));
             lastEnd = m.end();
         }
-        if (lastEnd < s.length()) {
-            parts.add(new LiteralNode(token, s.substring(lastEnd), "string"));
-        }
-        if (parts.isEmpty()) {
-            return new LiteralNode(token, "", "string");
-        }
-        // Build left-associative concatenation tree
+        if (lastEnd < s.length()) parts.add(new LiteralNode(token, s.substring(lastEnd), "string"));
+        if (parts.isEmpty()) return new LiteralNode(token, "", "string");
         ExpressionNode result = parts.get(0);
         for (int i = 1; i < parts.size(); i++) {
             result = new BinaryOpNode(token, result, "+", parts.get(i));
@@ -526,11 +607,7 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
     public AnnotationNode visitAnnotationUsage(MammothParser.AnnotationUsageContext ctx) {
         String typeName = ctx.qualifiedName().getText();
         AnnotationNode ann = new AnnotationNode(ctx.start, typeName);
-
-        if (ctx.annotationTarget() != null) {
-            ann.setTarget(ctx.annotationTarget().getText());
-        }
-
+        if (ctx.annotationTarget() != null) ann.setTarget(ctx.annotationTarget().getText());
         if (ctx.annotationArgs() != null) {
             for (MammothParser.AnnotationArgContext argCtx : ctx.annotationArgs().annotationArg()) {
                 String argName = argCtx.IDENTIFIER() != null ? argCtx.IDENTIFIER().getText() : null;
@@ -538,7 +615,6 @@ public class AstBuilder extends MammothBaseVisitor<Object> {
                 ann.addArg(new AnnotationNode.AnnotationArg(argName, value));
             }
         }
-
         return ann;
     }
 }

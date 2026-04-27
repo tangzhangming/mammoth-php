@@ -55,11 +55,19 @@ public class SemanticAnalyzer {
         symbolTable.pushScope();
         symbolTable.resetLocalVarCount();
 
-        // Register parameters
-        // For main method without parameters, we still generate String[] args in bytecode
         boolean isMain = method.getName().equals("main") && method.isStatic();
-        if (isMain && method.getParameters().isEmpty()) {
-            // main() without args - this is fine, the bytecode generator handles it
+
+        // Slot 0: $this (instance) or String[] args (main with no params)
+        if (!method.isStatic() && !currentClass.isInterface()) {
+            Symbol thisSym = new Symbol("$this", Symbol.SymbolKind.PARAMETER);
+            thisSym.setTypeNode(new TypeNode(currentClass.getName(), false));
+            thisSym.setResolvedType(MammothType.STRING);
+            thisSym.setLocalIndex(0);
+            thisSym.setInitialized(true);
+            symbolTable.define(thisSym);
+            symbolTable.allocateLocalVar(false); // advance past slot 0
+        } else if (isMain && method.getParameters().isEmpty()) {
+            symbolTable.allocateLocalVar(false); // reserve slot 0 for String[] args
         }
 
         for (ParameterNode param : method.getParameters()) {
@@ -76,12 +84,23 @@ public class SemanticAnalyzer {
                 sym.setLocalIndex(symbolTable.allocateLocalVar(false));
             }
 
-            sym.setInitialized(true); // Parameters are always initialized
+            sym.setInitialized(true);
 
             if (param.getDefaultValue() != null) {
                 resolveExpression(param.getDefaultValue());
             }
             symbolTable.define(sym);
+
+            // Property promotion: register promoted param as field
+            if (param.isPromoted() && method.isConstructor()) {
+                Symbol fieldSym = new Symbol(name, Symbol.SymbolKind.FIELD);
+                fieldSym.setTypeNode(param.getType());
+                if (param.getType() != null) {
+                    fieldSym.setResolvedType(resolveType(param.getType()));
+                }
+                fieldSym.setInitialized(true);
+                symbolTable.define(fieldSym); // add to global scope too
+            }
         }
 
         // Resolve return type
@@ -254,6 +273,11 @@ public class SemanticAnalyzer {
             for (ExpressionNode arg : nn.getArguments()) {
                 resolveExpression(arg);
             }
+        } else if (expr instanceof MemberAccessNode man) {
+            resolveExpression(man.getTarget());
+            resolveMemberAccess(man);
+        } else if (expr instanceof StaticAccessNode san) {
+            resolveStaticAccess(san);
         }
     }
 
@@ -435,11 +459,71 @@ public class SemanticAnalyzer {
 
     private void resolveVariable(VariableNode vn) {
         String name = vn.getName();
+        // $this → slot 0, Object ref
+        if ("$this".equals(name)) {
+            vn.setInferredType(new TypeNode(currentClass != null ? currentClass.getName() : "Object", false));
+            vn.setResolvedType(MammothType.STRING); // Object reference
+            vn.setLocalIndex(0);
+            return;
+        }
         Symbol sym = symbolTable.resolve(name);
         if (sym != null) {
             vn.setInferredType(sym.getTypeNode());
             vn.setResolvedType(sym.getResolvedType());
             vn.setLocalIndex(sym.getLocalIndex());
+        }
+    }
+
+    private void resolveMemberAccess(MemberAccessNode man) {
+        // Resolve the member being accessed. The target is $this or $obj.
+        // Look up the member in currentClass fields/methods.
+        String memberName = man.getMemberName();
+        // Check fields
+        for (FieldNode field : currentClass.getFields()) {
+            if (field.getName().equals(memberName) || field.getName().equals("$" + memberName)) {
+                man.setFieldType(field.getType() != null ? MammothType.fromTypeName(field.getType().getBaseTypeName()) : MammothType.STRING);
+                man.setFieldOwner(currentClass.getName());
+                man.setFieldDescriptor(man.getFieldType().getDescriptor());
+                man.setMethodCall(false);
+                return;
+            }
+        }
+        // Not a field → assume method call
+        man.setMethodCall(true);
+        for (ExpressionNode arg : man.getArgs()) {
+            resolveExpression(arg);
+        }
+    }
+
+    private void resolveStaticAccess(StaticAccessNode san) {
+        String className = san.getClassName();
+        String memberName = san.getMemberName();
+
+        if ("self".equals(className)) {
+            san.setResolvedOwner(currentClass.getName());
+        } else if ("parent".equals(className)) {
+            san.setResolvedOwner(currentClass.getParentClassName());
+        } else {
+            san.setResolvedOwner(className);
+        }
+
+        // Resolve field type
+        if (!san.isMethodCall()) {
+            for (FieldNode field : currentClass.getFields()) {
+                if (field.getName().equals(memberName) || field.getName().equals("$" + memberName)) {
+                    if (field.getType() != null) {
+                        san.setResolvedType(MammothType.fromTypeName(field.getType().getBaseTypeName()));
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Resolve args
+        if (san.getArgs() != null) {
+            for (ExpressionNode arg : san.getArgs()) {
+                resolveExpression(arg);
+            }
         }
     }
 
@@ -460,6 +544,9 @@ public class SemanticAnalyzer {
         } else if (value instanceof ClosureNode) {
             inferred = new TypeNode("string", false);
             mt = MammothType.STRING;
+        } else if (value instanceof NewNode nn) {
+            inferred = new TypeNode(nn.getClassName(), false);
+            mt = MammothType.STRING; // Object reference
         }
 
         if (inferred != null && mt != null) {

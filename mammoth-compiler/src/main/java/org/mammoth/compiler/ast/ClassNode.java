@@ -9,8 +9,13 @@ public class ClassNode extends MammothNode {
     private final java.util.List<FieldNode> fields = new java.util.ArrayList<>();
     private final java.util.List<AnnotationNode> annotations = new java.util.ArrayList<>();
     private final java.util.List<String> enumConstants = new java.util.ArrayList<>();
+    private final java.util.List<String> interfaces = new java.util.ArrayList<>();
     private boolean isAnnotation;
     private boolean isEnum;
+    private boolean isAbstract;
+    private boolean isInterface;
+    private boolean isFinal;
+    private String parentClassName;  // extends clause
 
     public ClassNode(Token token, String name) {
         super(token);
@@ -34,4 +39,15 @@ public class ClassNode extends MammothNode {
     public void setEnum(boolean isEnum) { this.isEnum = isEnum; }
     public java.util.List<String> getEnumConstants() { return enumConstants; }
     public void addEnumConstant(String constant) { enumConstants.add(constant); }
+
+    public boolean isAbstract() { return isAbstract; }
+    public void setAbstract(boolean v) { isAbstract = v; }
+    public boolean isInterface() { return isInterface; }
+    public void setInterface(boolean v) { isInterface = v; }
+    public boolean isFinal() { return isFinal; }
+    public void setFinal(boolean v) { isFinal = v; }
+    public String getParentClassName() { return parentClassName; }
+    public void setParentClassName(String n) { parentClassName = n; }
+    public java.util.List<String> getInterfaces() { return interfaces; }
+    public void addInterface(String iface) { interfaces.add(iface); }
 }

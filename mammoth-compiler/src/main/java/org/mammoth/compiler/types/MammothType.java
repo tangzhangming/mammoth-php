@@ -65,7 +65,7 @@ public enum MammothType {
             case "void"    -> VOID;
             case "nothing" -> NOTHING;
             case "null"    -> NULL;
-            default -> throw new IllegalArgumentException("Unknown type: " + name);
+            default -> NULL;  // Class types → treat as Object reference
         };
     }
 
