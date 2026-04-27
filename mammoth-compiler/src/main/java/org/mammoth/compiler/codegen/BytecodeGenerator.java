@@ -310,6 +310,101 @@ public class BytecodeGenerator {
 
         mv.visitMaxs(100, 100);
         mv.visitEnd();
+
+        // Generate $default synthetic method if any parameter has a default value
+        if (!isMain) {
+            boolean hasDefaults = false;
+            for (ParameterNode p : method.getParameters()) {
+                if (p.getDefaultValue() != null) { hasDefaults = true; break; }
+            }
+            if (hasDefaults) {
+                generateDefaultMethod(cw, method, symbolTable);
+            }
+        }
+    }
+
+    /**
+     * Generate synthetic $default method (Kotlin-style) for default parameter values.
+     * Takes all real params + an int mask. If bit i is set, param i is overwritten with its default.
+     * Then delegates to the real method.
+     */
+    private void generateDefaultMethod(ClassWriter cw, MethodNode method, SymbolTable symbolTable) {
+        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+        String defaultName = method.getName() + "$default";
+        MammothType returnType = getReturnType(method);
+        List<ParameterNode> params = method.getParameters();
+
+        // Build descriptor: same params + I (int mask), same return
+        String realDesc = buildMethodDescriptor(method);
+        int closeIdx = realDesc.indexOf(')');
+        String paramsOnly = realDesc.substring(1, closeIdx);
+        String retOnly = realDesc.substring(closeIdx + 1);
+        String defaultDesc = "(" + paramsOnly + "I)" + retOnly;
+
+        MethodVisitor mv = cw.visitMethod(access, defaultName, defaultDesc, null, null);
+        mv.visitCode();
+
+        // Compute slot for each param and the mask
+        int slot = 0;
+        for (ParameterNode p : params) {
+            if (p.getType() != null) {
+                MammothType mt = MammothType.fromTypeName(p.getType().getBaseTypeName());
+                slot += (mt == MammothType.INT64 || mt == MammothType.FLOAT64) ? 2 : 1;
+            } else {
+                slot++;
+            }
+        }
+        int maskSlot = slot;
+
+        // For each param with a default: if (mask & (1<<i)) != 0 → param = default
+        slot = 0;
+        for (int i = 0; i < params.size(); i++) {
+            ParameterNode p = params.get(i);
+            MammothType pt = p.getType() != null
+                ? MammothType.fromTypeName(p.getType().getBaseTypeName())
+                : MammothType.STRING;
+
+            if (p.getDefaultValue() != null) {
+                mv.visitVarInsn(Opcodes.ILOAD, maskSlot);
+                pushInt(mv, 1 << i);
+                mv.visitInsn(Opcodes.IAND);
+                Label skip = new Label();
+                mv.visitJumpInsn(Opcodes.IFEQ, skip);
+
+                // Overwrite param with default value
+                generateExpression(mv, p.getDefaultValue(), symbolTable);
+                MammothType defType = getExprType(p.getDefaultValue());
+                emitCast(mv, defType, pt);
+                mv.visitVarInsn(pt.getStoreOpcode(), slot);
+
+                mv.visitLabel(skip);
+            }
+            slot += (pt == MammothType.INT64 || pt == MammothType.FLOAT64) ? 2 : 1;
+        }
+
+        // Load all params and call real method
+        slot = 0;
+        for (int i = 0; i < params.size(); i++) {
+            ParameterNode p = params.get(i);
+            if (p.getType() != null) {
+                MammothType mt = MammothType.fromTypeName(p.getType().getBaseTypeName());
+                mv.visitVarInsn(mt.getLoadOpcode(), slot);
+                slot += (mt == MammothType.INT64 || mt == MammothType.FLOAT64) ? 2 : 1;
+            } else {
+                mv.visitVarInsn(Opcodes.ALOAD, slot);
+                slot++;
+            }
+        }
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, currentClassInternalName, method.getName(),
+            realDesc, false);
+
+        if (returnType != MammothType.VOID) {
+            mv.visitInsn(returnType.getReturnOpcode());
+        } else {
+            mv.visitInsn(Opcodes.RETURN);
+        }
+        mv.visitMaxs(10, slot + 1);
+        mv.visitEnd();
     }
 
     private int registerClosure(ClosureNode closure) {
@@ -843,26 +938,29 @@ public class BytecodeGenerator {
         }
 
         List<ExpressionNode> effectiveArgs = new ArrayList<>(mcn.getArguments());
+        String effectiveMethodName = methodName;
+        int defaultMask = 0;
+        int totalParams = 0;
+
         if (targetMethod != null) {
+            totalParams = targetMethod.getParameters().size();
             List<String> argNames = mcn.getArgumentNames();
             boolean hasNamed = false;
             for (String an : argNames) {
                 if (an != null) { hasNamed = true; break; }
             }
 
-            if (hasNamed) {
-                // Reorder named arguments to match parameter declaration order
-                int paramCount = targetMethod.getParameters().size();
-                ExpressionNode[] reordered = new ExpressionNode[paramCount];
-                boolean[] filled = new boolean[paramCount];
+            // Build reordered array: [paramIndex] = argument or null
+            ExpressionNode[] reordered = new ExpressionNode[totalParams];
+            boolean[] filled = new boolean[totalParams];
 
+            if (hasNamed) {
                 for (int i = 0; i < mcn.getArguments().size(); i++) {
                     String argName = i < argNames.size() ? argNames.get(i) : null;
                     ExpressionNode arg = mcn.getArguments().get(i);
                     if (argName != null) {
-                        // Named argument: find parameter by name
                         String lookupName = argName.startsWith("$") ? argName : "$" + argName;
-                        for (int p = 0; p < paramCount; p++) {
+                        for (int p = 0; p < totalParams; p++) {
                             if (targetMethod.getParameters().get(p).getName().equals(lookupName)) {
                                 reordered[p] = arg;
                                 filled[p] = true;
@@ -870,76 +968,73 @@ public class BytecodeGenerator {
                             }
                         }
                     } else {
-                        // Positional argument: first unfilled slot
-                        for (int p = 0; p < paramCount; p++) {
-                            if (!filled[p]) {
-                                reordered[p] = arg;
-                                filled[p] = true;
-                                break;
-                            }
+                        for (int p = 0; p < totalParams; p++) {
+                            if (!filled[p]) { reordered[p] = arg; filled[p] = true; break; }
                         }
-                    }
-                }
-                // Fill defaults for unfilled slots
-                for (int p = 0; p < paramCount; p++) {
-                    if (!filled[p]) {
-                        ParameterNode param = targetMethod.getParameters().get(p);
-                        if (param.getDefaultValue() != null) {
-                            reordered[p] = param.getDefaultValue();
-                            filled[p] = true;
-                        }
-                    }
-                }
-                effectiveArgs.clear();
-                for (int p = 0; p < paramCount; p++) {
-                    if (filled[p]) {
-                        effectiveArgs.add(reordered[p]);
-                    } else {
-                        break;
                     }
                 }
             } else {
-                // No named args: just fill in defaults for missing positional args
-                int paramCount = targetMethod.getParameters().size();
-                while (effectiveArgs.size() < paramCount) {
-                    int idx = effectiveArgs.size();
-                    ParameterNode param = targetMethod.getParameters().get(idx);
+                // Positional only
+                for (int i = 0; i < mcn.getArguments().size(); i++) {
+                    if (i < totalParams) { reordered[i] = mcn.getArguments().get(i); filled[i] = true; }
+                }
+            }
+
+            // Compute bitmask and build effective args (with dummy values for unfilled)
+            effectiveArgs.clear();
+            for (int p = 0; p < totalParams; p++) {
+                if (filled[p]) {
+                    effectiveArgs.add(reordered[p]);
+                } else {
+                    // Param not provided: check if it has a default
+                    ParameterNode param = targetMethod.getParameters().get(p);
                     if (param.getDefaultValue() != null) {
-                        effectiveArgs.add(param.getDefaultValue());
+                        defaultMask |= (1 << p);
+                        // Push a dummy value matching the parameter type
+                        effectiveArgs.add(createDummyArg(param));
                     } else {
+                        // No default — stop here
                         break;
                     }
                 }
+            }
+
+            // If any defaults were used, redirect to $default
+            if (defaultMask != 0) {
+                effectiveMethodName = methodName + "$default";
+                // Append mask argument
+                effectiveArgs.add(new LiteralNode(null, defaultMask, "int"));
             }
         }
 
         for (int i = 0; i < effectiveArgs.size(); i++) {
             ExpressionNode arg = effectiveArgs.get(i);
             generateExpression(mv, arg, symbolTable);
-            // Cast argument to match parameter type
-            if (targetMethod != null && i < targetMethod.getParameters().size()) {
-                ParameterNode param = targetMethod.getParameters().get(i);
-                if (param.getType() != null) {
-                    MammothType paramType = MammothType.fromTypeName(param.getType().getBaseTypeName());
-                    MammothType argType = getExprType(arg);
-                    emitCast(mv, argType, paramType);
-                }
+            // Cast argument to match parameter type (skip the mask arg)
+            if (targetMethod != null && i < totalParams
+                && targetMethod.getParameters().get(i).getType() != null) {
+                MammothType paramType = MammothType.fromTypeName(
+                    targetMethod.getParameters().get(i).getType().getBaseTypeName());
+                MammothType argType = getExprType(arg);
+                emitCast(mv, argType, paramType);
             }
         }
         StringBuilder desc = new StringBuilder("(");
         for (int i = 0; i < effectiveArgs.size(); i++) {
             ExpressionNode arg = effectiveArgs.get(i);
             MammothType type;
-            if (targetMethod != null && i < targetMethod.getParameters().size()
+            if (i < totalParams && targetMethod != null
                 && targetMethod.getParameters().get(i).getType() != null) {
-                type = MammothType.fromTypeName(targetMethod.getParameters().get(i).getType().getBaseTypeName());
+                type = MammothType.fromTypeName(
+                    targetMethod.getParameters().get(i).getType().getBaseTypeName());
             } else {
                 type = getExprType(arg);
             }
             desc.append(type != null ? type.getDescriptor() : "Ljava/lang/Object;");
         }
         desc.append(")V");
-        mv.visitMethodInsn(Opcodes.INVOKESTATIC, currentClassInternalName, methodName, desc.toString(), false);
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, currentClassInternalName,
+            effectiveMethodName, desc.toString(), false);
     }
 
     // ======================== Binary ops ========================
@@ -1525,6 +1620,22 @@ public class BytecodeGenerator {
     private String stripDollar(String name) {
         if (name.startsWith("$")) return name.substring(1);
         return name;
+    }
+
+    /**
+     * Create a dummy argument AST node of the correct type for a parameter
+     * whose value will be overwritten by $default based on the bitmask.
+     */
+    private ExpressionNode createDummyArg(ParameterNode param) {
+        if (param.getType() != null) {
+            MammothType mt = MammothType.fromTypeName(param.getType().getBaseTypeName());
+            return switch (mt) {
+                case INT8, INT16, INT32, INT64, BOOLEAN -> new LiteralNode(null, 0, "int");
+                case FLOAT32, FLOAT64 -> new LiteralNode(null, 0.0, "float");
+                default -> new LiteralNode(null, null, "null");
+            };
+        }
+        return new LiteralNode(null, null, "null");
     }
 
     private MammothType inferClosureReturnType(ClosureNode closure) {
